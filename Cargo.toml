@@ -1,0 +1,26 @@
+[package]
+name = "ct"
+version = "0.1.0"
+edition = "2024"
+description = "a vim-style terminal app for claude code chats: sidebar history, live claude pane and a shell"
+license = "MIT"
+repository = "https://github.com/Par-python/claude-term"
+
+[dependencies]
+anyhow = "1.0.104"
+crossterm = "0.29"
+dirs = "7.0.0"
+libc = "0.2"
+notify = "8"
+portable-pty = "0.9"
+ratatui = "0.30"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+signal-hook = "0.3"
+toml = "1.2.1"
+unicode-width = "0.2.3"
+uuid = { version = "1.29.3", features = ["v4"] }
+vt100 = "0.18"
+
+[dev-dependencies]
+tempfile = "3.27.0"
