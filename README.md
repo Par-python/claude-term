@@ -116,7 +116,7 @@ the dots next to a chat only show for chats ct started. `●` means it is printi
 
 chats with nothing in them yet are hidden unless ct is running them, and the status line shows how many other chats are running.
 
-the prefix is `ctrl+space` by default. it can also be `ctrl+a` ... `ctrl+z`, except `ctrl+h`, `ctrl+i`, `ctrl+j` and `ctrl+m` (and `ctrl+[`): terminals send those as backspace, tab, newline, enter and esc, so ct can't tell them from the plain keys. ct ignores those and uses `ctrl+space` instead. every other key goes straight to claude or the shell when that pane has focus. when a pane's process has exited, press `enter` in it to restart.
+the prefix is `ctrl+space` by default. on macOS that shortcut often switches the input source (keyboard language) before ct sees it: either turn that off in system settings, keyboard, keyboard shortcuts, input sources, or set `prefix = "ctrl+a"` (or another letter) in the config. keys like `?`, `{` and `G` need shift, as usual. it can also be `ctrl+a` ... `ctrl+z`, except `ctrl+h`, `ctrl+i`, `ctrl+j` and `ctrl+m` (and `ctrl+[`): terminals send those as backspace, tab, newline, enter and esc, so ct can't tell them from the plain keys. ct ignores those and uses `ctrl+space` instead. every other key goes straight to claude or the shell when that pane has focus. when a pane's process has exited, press `enter` in it to restart.
 
 ## scrolling and the mouse
 
