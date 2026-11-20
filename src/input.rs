@@ -54,6 +54,7 @@ impl App {
         }
         match self.focus {
             Focus::Sidebar => self.sidebar_key(k),
+            Focus::Env => self.env_key(k),
             Focus::Chat | Focus::Shell => {
                 if self.focused_exited() && k.code == KeyCode::Enter {
                     self.restart_focused();
@@ -73,6 +74,11 @@ impl App {
             PrefixCmd::Quit => return false,
             PrefixCmd::Help => self.help = true,
             PrefixCmd::Scroll => self.enter_scroll_mode(),
+            PrefixCmd::FocusLeft if self.focus == Focus::Env => self.focus = Focus::Chat,
+            PrefixCmd::FocusRight if matches!(self.focus, Focus::Chat | Focus::Shell) && self.env_visible() => {
+                self.scroll_mode = false;
+                self.focus = Focus::Env;
+            }
             PrefixCmd::FocusLeft => {
                 self.scroll_mode = false;
                 self.sidebar_visible = true;
@@ -87,6 +93,7 @@ impl App {
                 self.scroll_mode = false;
                 self.focus = Focus::Chat;
             }
+            PrefixCmd::EnvPanel => self.toggle_env(),
             PrefixCmd::Zoom => self.zoomed = !self.zoomed,
             PrefixCmd::ToggleSidebar => {
                 self.sidebar_visible = !self.sidebar_visible;
@@ -97,6 +104,16 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    fn env_key(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Char('j') | KeyCode::Down => self.env.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => self.env.move_cursor(-1),
+            KeyCode::Enter => self.env_enter(),
+            KeyCode::Char('h') | KeyCode::Esc => self.focus = Focus::Chat,
+            _ => {}
+        }
     }
 
     fn sidebar_key(&mut self, k: KeyEvent) {
@@ -129,6 +146,11 @@ impl App {
                 KeyCode::Char('f') => self.start_fork(&id),
                 KeyCode::Esc => {}
                 _ => self.modal = Modal::ForkPrompt { id },
+            },
+            Modal::RemoteConfirm { id } => match k.code {
+                KeyCode::Char('y') => self.restart_with_remote_flipped(&id),
+                KeyCode::Esc => {}
+                _ => self.modal = Modal::RemoteConfirm { id },
             },
             Modal::Filter(mut s) => match k.code {
                 KeyCode::Esc => self.sidebar.set_filter(""),

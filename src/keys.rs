@@ -20,6 +20,8 @@ pub enum PrefixCmd {
     Quit,
     /// the keys popup
     Help,
+    /// show / hide the environment panel
+    EnvPanel,
 }
 
 /// What the prefix config string means. Unknown values fall back to ctrl+space.
@@ -111,6 +113,7 @@ pub fn prefix_cmd(ev: &KeyEvent) -> Option<PrefixCmd> {
         KeyCode::Char('[') => Some(PrefixCmd::Scroll),
         KeyCode::Char('q') => Some(PrefixCmd::Quit),
         KeyCode::Char('?') => Some(PrefixCmd::Help),
+        KeyCode::Char('i') => Some(PrefixCmd::EnvPanel),
         _ => None,
     }
 }

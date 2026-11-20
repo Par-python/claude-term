@@ -104,12 +104,12 @@ fn hidden_sidebar_gives_full_width_to_panes() {
     let (_td, folders) = fixture();
     let mut app = App::for_test(folders);
     let area = Rect::new(0, 0, 80, 24);
-    let before = layout(area, app.sidebar_visible, app.zoomed, app.focus);
+    let before = layout(area, app.sidebar_visible, app.zoomed, app.focus, app.env_visible());
     assert_eq!(before.chat.unwrap().width, 80 - 32 - 1);
     app.handle(prefix());
     app.handle(ch('b'));
     assert!(!app.sidebar_visible);
-    let after = layout(area, app.sidebar_visible, app.zoomed, app.focus);
+    let after = layout(area, app.sidebar_visible, app.zoomed, app.focus, app.env_visible());
     assert!(after.sidebar.is_none());
     assert_eq!(after.chat.unwrap().width, 80);
     assert_eq!(after.shell.unwrap().width, 80);
@@ -329,7 +329,7 @@ fn paste_goes_into_prompts_and_never_triggers_jumps() {
 }
 
 fn pane_origin(app: &App) -> (u16, u16) {
-    let l = layout(Rect::new(0, 0, 80, 24), app.sidebar_visible, app.zoomed, app.focus);
+    let l = layout(Rect::new(0, 0, 80, 24), app.sidebar_visible, app.zoomed, app.focus, app.env_visible());
     let i = ct::ui::inner(l.chat.unwrap());
     (i.x, i.y)
 }
@@ -1197,4 +1197,643 @@ fn help_lists_page_keys_in_scroll_mode() {
     let text = render(&app).join("\n");
     assert!(text.contains("pgup/dn"), "{text}");
     assert!(!text.contains("taller"), "{text}");
+}
+
+// ---- environment panel ----
+
+fn env_fixture() -> (tempfile::TempDir, std::path::PathBuf, App) {
+    let (td, folders) = fixture();
+    let root = td.path().join("projects");
+    std::fs::create_dir_all(root.join("proj")).unwrap();
+    let mut app = App::for_test(folders);
+    app.set_root(root.clone());
+    app.set_area(Rect::new(0, 0, 120, 30));
+    (td, root.join("proj"), app)
+}
+
+fn all_text(app: &App, w: u16, h: u16) -> String {
+    let buf = buf_at(app, w, h);
+    (0..h).map(|y| row_text(&buf, y)).collect::<Vec<_>>().join("\n")
+}
+
+fn chat_cols(app: &App, id: &str) -> u16 {
+    app.procs.chat_pane(id).unwrap().screen_lock().screen().size().1.get()
+}
+
+#[test]
+fn prefix_i_toggles_env() {
+    let (_td, _p, mut app) = env_fixture();
+    assert!(!app.env_visible());
+    app.handle(prefix());
+    app.handle(ch('i'));
+    assert!(app.env_visible());
+    app.handle(prefix());
+    app.handle(ch('i'));
+    assert!(!app.env_visible());
+}
+
+#[test]
+fn env_hidden_when_narrow() {
+    let (_td, _p, mut app) = env_fixture();
+    app.handle(prefix());
+    app.handle(ch('i'));
+    app.set_area(Rect::new(0, 0, 99, 30));
+    assert!(!app.env_visible());
+    assert!(!all_text(&app, 99, 30).contains("environment"));
+    app.set_area(Rect::new(0, 0, 100, 30));
+    assert!(app.env_visible());
+    assert!(all_text(&app, 100, 30).contains("environment"));
+    // zoom hides it too, and the toggle is kept
+    app.handle(prefix());
+    app.handle(ch('z'));
+    assert!(!app.env_visible());
+    app.handle(prefix());
+    app.handle(ch('z'));
+    assert!(app.env_visible());
+}
+
+#[test]
+fn env_panel_rows() {
+    let (td, proj, mut app) = env_fixture();
+    app.set_test_script("sleep 5");
+    app.env.host = "mybox".into();
+    app.handle(alt('1'));
+    let session = proj.join("a1.jsonl");
+    std::fs::write(
+        &session,
+        concat!(
+            r#"{"type":"assistant","message":{"model":"claude-opus-4","usage":{"input_tokens":50000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/tmp/x/report.md"}},{"type":"tool_use","name":"Edit","input":{"file_path":"/tmp/x/main.rs"}}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    app.handle(prefix());
+    app.handle(ch('i'));
+    app.handle(AppEvent::Tick);
+    app.handle(AppEvent::GitBranch { chat: "a1".into(), branch: "feature/x".into() });
+    let text = all_text(&app, 120, 30);
+    for want in ["environment", "this computer · mybox", "my-app · ", "feature/x", "remote control", "off", "context", "25%", "connectors", "checking…", "OUTPUTS", "report.md", "main.rs"] {
+        assert!(text.contains(want), "missing {want:?} in\n{text}");
+    }
+    let _ = td;
+}
+
+#[test]
+fn env_toggle_resizes_panes() {
+    let (_td, _p, mut app) = env_fixture();
+    app.handle(alt('1'));
+    let before = chat_cols(&app, "a1");
+    app.handle(prefix());
+    app.handle(ch('i'));
+    assert_eq!(chat_cols(&app, "a1"), before - 35);
+    app.handle(prefix());
+    app.handle(ch('i'));
+    assert_eq!(chat_cols(&app, "a1"), before);
+    // narrowing the terminal under the panel also gives the width back
+    app.handle(prefix());
+    app.handle(ch('i'));
+    app.handle(AppEvent::Input(Event::Resize(99, 30)));
+    assert_eq!(chat_cols(&app, "a1"), 99 - 33);
+}
+
+#[test]
+fn stale_branch_ignored() {
+    let (_td, _p, mut app) = env_fixture();
+    app.handle(alt('1'));
+    app.handle(prefix());
+    app.handle(ch('i'));
+    app.handle(AppEvent::GitBranch { chat: "b1".into(), branch: "other-branch".into() });
+    assert!(!all_text(&app, 120, 30).contains("other-branch"));
+    app.handle(AppEvent::GitBranch { chat: "a1".into(), branch: "mine".into() });
+    assert!(all_text(&app, 120, 30).contains("mine"));
+    // switching chats clears the old chat's branch, and a late result for it is dropped
+    app.handle(alt('3'));
+    assert_eq!(app.open_chat.as_deref(), Some("b1"));
+    assert!(!all_text(&app, 120, 30).contains("mine"));
+    app.handle(AppEvent::GitBranch { chat: "a1".into(), branch: "late".into() });
+    assert!(!all_text(&app, 120, 30).contains("late"));
+}
+
+#[test]
+fn env_state_persists() {
+    let td = tempfile::tempdir().unwrap();
+    let p = td.path().join("state.toml");
+    assert!(!ct::state::load_env_panel_from(&p));
+    ct::state::save_env_panel_to(&p, true);
+    assert!(ct::state::load_env_panel_from(&p));
+    ct::state::save_last_to(&p, "abc");
+    assert!(ct::state::load_env_panel_from(&p));
+    ct::state::save_env_panel_to(&p, false);
+    assert!(!ct::state::load_env_panel_from(&p));
+}
+
+#[test]
+fn help_lists_env_key() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    open_help(&mut app);
+    let text = render(&app).join("\n");
+    assert!(text.contains("prefix, then i"), "{text}");
+    assert!(text.contains("environment panel"), "{text}");
+    assert!(!text.contains("taller"), "{text}");
+}
+
+#[test]
+fn hidden_panel_does_no_session_lookups() {
+    let (_td, _p, mut app) = env_fixture();
+    app.handle(alt('1'));
+    for _ in 0..3 {
+        app.handle(AppEvent::Tick);
+        app.handle(ch('x'));
+    }
+    assert_eq!(app.env.lookups, 0);
+    app.handle(prefix());
+    app.handle(ch('i'));
+    // not on arbitrary events, only on ticks
+    app.handle(ch('x'));
+    assert_eq!(app.env.lookups, 0);
+    app.handle(AppEvent::Tick);
+    assert_eq!(app.env.lookups, 1);
+}
+
+#[test]
+fn session_file_is_found_in_the_encoded_project_dir() {
+    let (td, folders) = fixture();
+    let cwd = td.path().join("my-app");
+    let root = td.path().join("projects");
+    let enc = ct::env_panel::encode_project_dir(&cwd);
+    assert!(enc.starts_with('-') && !enc.contains('/') && !enc.contains('.') && !enc.contains('_'));
+    std::fs::create_dir_all(root.join(&enc)).unwrap();
+    std::fs::write(root.join(&enc).join("a1.jsonl"), "").unwrap();
+    // an old file, so opening the chat doesn't look like another claude is using it
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(root.join(&enc).join("a1.jsonl")).unwrap().set_modified(old).unwrap();
+    let mut app = App::for_test(folders);
+    app.set_root(root.clone());
+    app.set_area(Rect::new(0, 0, 120, 30));
+    app.handle(prefix());
+    app.handle(ch('i'));
+    app.handle(alt('1'));
+    // found at once on the switch, with no scan
+    assert!(app.env.tracker.is_some());
+    assert_eq!(ct::env_panel::locate_session(&root, &cwd, "nope", false), None);
+}
+
+#[test]
+fn env_is_34_wide_at_100_columns_with_sidebar() {
+    let (_td, _p, mut app) = env_fixture();
+    app.handle(prefix());
+    app.handle(ch('i'));
+    let l = layout(Rect::new(0, 0, 100, 30), true, false, Focus::Sidebar, app.env_visible());
+    assert_eq!(l.env.unwrap().width, 34);
+}
+
+#[test]
+fn new_chat_gets_its_branch_after_a_switch_with_a_read_in_flight() {
+    let mut p = ct::env_panel::EnvPanel::new();
+    p.switch(Some("a".into()));
+    let _stuck = p.branch_started();
+    assert!(!p.branch_due());
+    p.switch(Some("b".into()));
+    assert!(p.branch_due());
+}
+
+#[test]
+fn output_polls_are_rate_limited_but_ticks_are_not() {
+    let (_td, proj, mut app) = env_fixture();
+    app.handle(alt('1'));
+    app.handle(prefix());
+    app.handle(ch('i'));
+    let session = proj.join("a1.jsonl");
+    let line = |n: u64| format!("{{\"type\":\"assistant\",\"message\":{{\"model\":\"m\",\"usage\":{{\"input_tokens\":{n}}}}}}}\n");
+    std::fs::write(&session, line(50000)).unwrap();
+    app.handle(AppEvent::Tick);
+    assert_eq!(app.env.context_pct(), Some(25));
+    std::fs::write(&session, format!("{}{}", line(50000), line(100000))).unwrap();
+    let pid = app.procs.chat_pane("a1").unwrap().id;
+    app.handle(AppEvent::Pty(ct::pane::Notify::Output(pid)));
+    assert_eq!(app.env.context_pct(), Some(25));
+    app.handle(AppEvent::Tick);
+    assert_eq!(app.env.context_pct(), Some(50));
+}
+
+#[test]
+fn long_connector_names_keep_their_status_visible() {
+    let (_td, _p, mut app) = env_fixture();
+    app.handle(alt('1'));
+    app.handle(prefix());
+    app.handle(ch('i'));
+    app.env.connectors = ct::env::Connectors::Ready(vec![ct::env::Connector {
+        name: "a-very-long-connector-name-that-overflows".into(),
+        status: ct::env::McpStatus::NeedsAuth,
+    }]);
+    app.env.expanded = true;
+    let text = all_text(&app, 120, 30);
+    assert!(text.contains("needs auth"), "{text}");
+    assert!(text.contains("a-very-long"), "{text}");
+}
+
+// ---- environment panel focus and actions ----
+
+fn env_on(app: &mut App) {
+    app.handle(prefix());
+    app.handle(ch('i'));
+}
+
+fn focus_env(app: &mut App) {
+    app.handle(prefix());
+    app.handle(ch('l'));
+}
+
+fn log_lines(p: &Path) -> Vec<String> {
+    std::fs::read_to_string(p).map(|t| t.lines().map(String::from).collect()).unwrap_or_default()
+}
+
+fn pane_id(app: &App, id: &str) -> ct::pane::PaneId {
+    app.procs.chat_pane(id).unwrap().id
+}
+
+#[test]
+fn focus_moves_into_env() {
+    let (_td, _p, mut app) = env_fixture();
+    app.handle(alt('1'));
+    // hidden: prefix l does nothing
+    focus_env(&mut app);
+    assert_eq!(app.focus, Focus::Chat);
+    env_on(&mut app);
+    focus_env(&mut app);
+    assert_eq!(app.focus, Focus::Env);
+    assert!(all_text(&app, 120, 30).contains("▸ environment"));
+    app.handle(prefix());
+    app.handle(ch('h'));
+    assert_eq!(app.focus, Focus::Chat);
+    // from the shell too
+    app.handle(prefix());
+    app.handle(ch('j'));
+    focus_env(&mut app);
+    assert_eq!(app.focus, Focus::Env);
+    // keys in the panel don't reach the pane, and hiding the panel gives focus back
+    env_on(&mut app);
+    assert_eq!(app.focus, Focus::Chat);
+}
+
+#[test]
+fn click_focuses_env() {
+    use crossterm::event::{MouseButton, MouseEventKind::Down};
+    let (_td, _p, mut app) = env_fixture();
+    app.handle(alt('1'));
+    env_on(&mut app);
+    app.handle(mouse(Down(MouseButton::Left), 110, 5));
+    assert_eq!(app.focus, Focus::Env);
+}
+
+#[test]
+fn jk_moves_env_cursor_over_actionable_rows() {
+    let (_td, proj, mut app) = env_fixture();
+    app.handle(alt('1'));
+    std::fs::write(
+        proj.join("a1.jsonl"),
+        concat!(
+            r#"{"type":"assistant","message":{"model":"m","usage":{"input_tokens":1},"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/tmp/x/one.md"}},{"type":"tool_use","name":"Write","input":{"file_path":"/tmp/x/two.md"}}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    env_on(&mut app);
+    app.handle(AppEvent::Tick);
+    focus_env(&mut app);
+    assert_eq!(app.env.cursor, 0);
+    app.handle(ch('k'));
+    assert_eq!(app.env.cursor, 0);
+    for want in [1, 2, 3, 3] {
+        app.handle(ch('j'));
+        assert_eq!(app.env.cursor, want);
+    }
+    app.handle(key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.env.cursor, 2);
+    // the selected row carries the edge marker
+    let text = all_text(&app, 120, 30);
+    assert!(text.lines().any(|l| l.contains("▌") && l.contains("one.md") || l.contains("▌") && l.contains("two.md")), "{text}");
+}
+
+#[test]
+fn enter_on_connectors_expands() {
+    use ct::env::{Connector, Connectors, McpStatus};
+    let (_td, _p, mut app) = env_fixture();
+    app.handle(alt('1'));
+    env_on(&mut app);
+    app.handle(AppEvent::Connectors(Connectors::Ready(vec![
+        Connector { name: "github".into(), status: McpStatus::Connected },
+        Connector { name: "slack".into(), status: McpStatus::NeedsAuth },
+        Connector { name: "db".into(), status: McpStatus::Failed },
+    ])));
+    focus_env(&mut app);
+    app.handle(ch('j'));
+    assert!(!all_text(&app, 120, 30).contains("needs auth"));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    let text = all_text(&app, 120, 30);
+    for want in ["github", "connected", "slack", "needs auth", "db", "failed"] {
+        assert!(text.contains(want), "missing {want}\n{text}");
+    }
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!all_text(&app, 120, 30).contains("needs auth"));
+}
+
+fn output_fixture(files: &[&Path]) -> (tempfile::TempDir, App) {
+    let (td, proj, mut app) = env_fixture();
+    app.handle(alt('1'));
+    let blocks: Vec<String> = files
+        .iter()
+        .map(|f| format!(r#"{{"type":"tool_use","name":"Write","input":{{"file_path":"{}"}}}}"#, f.display()))
+        .collect();
+    std::fs::write(
+        proj.join("a1.jsonl"),
+        format!("{{\"type\":\"assistant\",\"message\":{{\"model\":\"m\",\"usage\":{{\"input_tokens\":1}},\"content\":[{}]}}}}\n", blocks.join(",")),
+    )
+    .unwrap();
+    env_on(&mut app);
+    app.handle(AppEvent::Tick);
+    focus_env(&mut app);
+    (td, app)
+}
+
+#[test]
+fn enter_on_output_opens() {
+    let td = tempfile::tempdir().unwrap();
+    let file = td.path().join("report.md");
+    std::fs::write(&file, "x").unwrap();
+    let (_t, mut app) = output_fixture(&[&file]);
+    let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PathBuf>::new()));
+    let o = opened.clone();
+    app.set_opener(move |p| o.borrow_mut().push(p.to_path_buf()));
+    app.handle(ch('j'));
+    app.handle(ch('j'));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(*opened.borrow(), vec![file]);
+    assert_eq!(app.modal, Modal::None);
+}
+
+#[test]
+fn missing_output_shows_message() {
+    let td = tempfile::tempdir().unwrap();
+    let file = td.path().join("gone.md");
+    let (_t, mut app) = output_fixture(&[&file]);
+    let opened = std::rc::Rc::new(std::cell::RefCell::new(0));
+    let o = opened.clone();
+    app.set_opener(move |_| *o.borrow_mut() += 1);
+    app.handle(ch('j'));
+    app.handle(ch('j'));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.modal, Modal::Message("file no longer exists".into()));
+    assert_eq!(*opened.borrow(), 0);
+}
+
+fn remote_fixture(script_body: &str) -> (tempfile::TempDir, PathBuf, App) {
+    let (td, _p, mut app) = env_fixture();
+    let log = td.path().join("argv.log");
+    app.set_test_script(&format!("echo \"$@\" >> {}; {script_body}", log.display()));
+    app.handle(alt('1'));
+    env_on(&mut app);
+    focus_env(&mut app);
+    (td, log, app)
+}
+
+#[test]
+fn remote_toggle_restarts_with_flag() {
+    let (_td, log, mut app) = remote_fixture("sleep 5");
+    wait_for("first start", || log_lines(&log).len() == 1);
+    assert!(!log_lines(&log)[0].contains("--remote-control"));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::Env);
+    wait_for("restart", || log_lines(&log).len() == 2);
+    assert!(log_lines(&log)[1].contains("--remote-control"), "{:?}", log_lines(&log));
+    assert!(all_text(&app, 120, 30).contains("remote control"));
+    assert!(app.remote.contains("a1"));
+    assert_eq!(app.procs.own_chat_pids().len(), 1);
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for("second restart", || log_lines(&log).len() == 3);
+    assert!(!log_lines(&log)[2].contains("--remote-control"));
+    assert!(!app.remote.contains("a1"));
+    assert_eq!(app.procs.own_chat_pids().len(), 1);
+    assert_eq!(app.focus, Focus::Env);
+    assert_eq!(log_lines(&log).len(), 3);
+}
+
+#[test]
+fn remote_toggle_confirms_when_working() {
+    let (_td, log, mut app) = remote_fixture("printf hi; sleep 5");
+    wait_for("output", || screen_text(&app, "a1").contains("hi"));
+    let id = pane_id(&app, "a1");
+    app.handle(AppEvent::Pty(ct::pane::Notify::Output(id)));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.modal, Modal::RemoteConfirm { .. }));
+    assert!(render(&app).join("\n").contains("restart claude to toggle remote control? y / esc"));
+    // esc cancels, nothing restarts
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.modal, Modal::None);
+    assert_eq!(pane_id(&app, "a1"), id);
+    assert!(!app.remote.contains("a1"));
+    // y confirms
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    app.handle(ch('y'));
+    assert_eq!(app.modal, Modal::None);
+    assert_ne!(pane_id(&app, "a1"), id);
+    assert!(app.remote.contains("a1"));
+    assert_eq!(app.focus, Focus::Env);
+    wait_for("restart", || log_lines(&log).len() == 2);
+}
+
+#[test]
+fn remote_toggle_on_exited_chat() {
+    let (_td, log, mut app) = remote_fixture("exit 0");
+    wait_for("exit", || app.procs.chat_pane("a1").unwrap().exited.load(std::sync::atomic::Ordering::SeqCst));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.modal, Modal::None);
+    wait_for("restart", || log_lines(&log).len() == 2);
+    assert!(log_lines(&log)[1].contains("--remote-control"));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(log_lines(&log).len(), 2);
+    assert_eq!(app.focus, Focus::Env);
+}
+
+#[test]
+fn remote_flag_survives_enter_restart_in_chat() {
+    let (_td, log, mut app) = remote_fixture("exit 0");
+    wait_for("exit", || app.procs.chat_pane("a1").unwrap().exited.load(std::sync::atomic::Ordering::SeqCst));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for("restart", || log_lines(&log).len() == 2);
+    wait_for("exit again", || app.procs.chat_pane("a1").unwrap().exited.load(std::sync::atomic::Ordering::SeqCst));
+    app.handle(prefix());
+    app.handle(ch('h'));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for("plain restart", || log_lines(&log).len() == 3);
+    assert!(log_lines(&log)[2].contains("--remote-control"), "{:?}", log_lines(&log));
+}
+
+fn pid_alive(pid: &str) -> bool {
+    std::process::Command::new("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+#[test]
+fn remote_toggle_kills_old_claude_before_new_starts() {
+    let (td, _p, mut app) = env_fixture();
+    let log = td.path().join("argv.log");
+    let pids = td.path().join("pids.log");
+    // ignores HUP, so only the hard kill after the grace period ends it
+    app.set_test_script(&format!("trap '' HUP; echo $$ >> {}; echo \"$@\" >> {}; while :; do sleep 1; done", pids.display(), log.display()));
+    app.handle(alt('1'));
+    env_on(&mut app);
+    focus_env(&mut app);
+    wait_for("first start", || log_lines(&pids).len() == 1);
+    let old = log_lines(&pids)[0].clone();
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    // by the time the toggle returns the old process is gone
+    assert!(!pid_alive(&old), "old claude {old} still alive");
+    wait_for("restart", || log_lines(&pids).len() == 2);
+    assert_ne!(log_lines(&pids)[1], old);
+    assert_eq!(app.procs.own_chat_pids().len(), 1);
+}
+
+#[test]
+fn remote_toggle_keeps_unwritten_fork() {
+    let (td, _p, mut app) = env_fixture();
+    let log = td.path().join("argv.log");
+    app.set_test_script(&format!("echo \"$@\" >> {}; sleep 5", log.display()));
+    app.modal = Modal::ForkPrompt { id: "a1".into() };
+    app.handle(ch('f'));
+    let fork = app.open_chat.clone().unwrap();
+    assert_ne!(fork, "a1");
+    env_on(&mut app);
+    focus_env(&mut app);
+    wait_for("fork start", || log_lines(&log).len() == 1);
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for("restart", || log_lines(&log).len() == 2);
+    let line = &log_lines(&log)[1];
+    assert!(line.contains("--resume a1 --fork-session --session-id"), "{line}");
+    assert!(line.contains(&fork) && line.ends_with("--remote-control"), "{line}");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for("toggle off", || log_lines(&log).len() == 3);
+    let line = &log_lines(&log)[2];
+    assert!(line.contains("--fork-session") && !line.contains("--remote-control"), "{line}");
+}
+
+#[test]
+fn output_selection_stays_on_its_file() {
+    let td = tempfile::tempdir().unwrap();
+    let (one, two, three) = (td.path().join("one.md"), td.path().join("two.md"), td.path().join("three.md"));
+    for f in [&one, &two, &three] {
+        std::fs::write(f, "x").unwrap();
+    }
+    let (t, mut app) = output_fixture(&[&one, &two]);
+    let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PathBuf>::new()));
+    let o = opened.clone();
+    app.set_opener(move |p| o.borrow_mut().push(p.to_path_buf()));
+    app.handle(ch('j'));
+    app.handle(ch('j'));
+    let want = app.env.outputs()[app.env.cursor - 2].clone();
+    // a new output arrives and takes the top of the list
+    let session = std::fs::read_dir(t.path().join("projects/proj")).unwrap().next().unwrap().unwrap().path();
+    let mut text = std::fs::read_to_string(&session).unwrap();
+    text.push_str(&format!(
+        "{{\"type\":\"assistant\",\"message\":{{\"model\":\"m\",\"usage\":{{\"input_tokens\":1}},\"content\":[{{\"type\":\"tool_use\",\"name\":\"Write\",\"input\":{{\"file_path\":\"{}\"}}}}]}}}}\n",
+        three.display()
+    ));
+    std::fs::write(&session, text).unwrap();
+    app.handle(AppEvent::Tick);
+    assert_eq!(app.env.outputs()[0], three);
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(*opened.borrow(), vec![want]);
+}
+
+#[test]
+fn remote_toggle_spawn_failure_keeps_preference() {
+    let (td, log, mut app) = remote_fixture("sleep 5");
+    wait_for("start", || log_lines(&log).len() == 1);
+    let _ = td;
+    app.set_fail_spawn(true);
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(&app.modal, Modal::Message(m) if m.contains("could not start claude")), "{:?}", app.modal);
+    assert!(!app.remote.contains("a1"));
+    assert_eq!(app.focus, Focus::Env);
+    assert_eq!(app.procs.own_chat_pids().len(), 0);
+}
+
+#[test]
+fn remote_flag_survives_enter_restart_with_history() {
+    let (td, proj, mut app) = env_fixture();
+    let f = std::fs::File::create(proj.join("a1.jsonl")).unwrap();
+    // old enough not to look like another claude is using it
+    f.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+    let log = td.path().join("argv.log");
+    app.set_test_script(&format!("echo \"$@\" >> {}; exit 0", log.display()));
+    app.handle(alt('1'));
+    env_on(&mut app);
+    focus_env(&mut app);
+    wait_for("start", || log_lines(&log).len() == 1);
+    assert_eq!(log_lines(&log)[0], "--resume a1");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for("toggle", || log_lines(&log).len() == 2);
+    assert_eq!(log_lines(&log)[1], "--resume a1 --remote-control");
+    wait_for("exit", || app.procs.chat_pane("a1").unwrap().exited.load(std::sync::atomic::Ordering::SeqCst));
+    app.handle(prefix());
+    app.handle(ch('h'));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for("plain restart", || log_lines(&log).len() == 3);
+    assert_eq!(log_lines(&log)[2], "--resume a1 --remote-control");
+}
+
+#[test]
+fn env_rule_and_header_keep_their_colors() {
+    let td = tempfile::tempdir().unwrap();
+    let file = td.path().join("report.md");
+    std::fs::write(&file, "x").unwrap();
+    let (_t, app) = output_fixture(&[&file]);
+    let buf = buf_at(&app, 120, 30);
+    let y = (0..30).find(|&y| row_text(&buf, y).contains('─')).expect("a rule");
+    let x = (0..120).find(|&x| buf[(x, y)].symbol() == "─").unwrap();
+    assert_eq!(buf[(x, y)].fg, theme::DIVIDER);
+    let y = (0..30).find(|&y| row_text(&buf, y).contains("OUTPUTS")).expect("header");
+    let x = (0..120).find(|&x| row_text(&buf, y).chars().nth(x as usize) == Some('O')).unwrap();
+    assert_eq!(buf[(x, y)].fg, theme::TEXT_DIM);
+}
+
+#[test]
+fn env_panel_scrolls_to_last_output_and_opens_it() {
+    let td = tempfile::tempdir().unwrap();
+    let files: Vec<PathBuf> = (0..40)
+        .map(|i| {
+            let f = td.path().join(format!("out{i:02}.md"));
+            std::fs::write(&f, "x").unwrap();
+            f
+        })
+        .collect();
+    let refs: Vec<&Path> = files.iter().map(|f| f.as_path()).collect();
+    let (_t, mut app) = output_fixture(&refs);
+    let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PathBuf>::new()));
+    let o = opened.clone();
+    app.set_opener(move |p| o.borrow_mut().push(p.to_path_buf()));
+    for _ in 0..41 {
+        app.handle(ch('j'));
+    }
+    let last = app.env.outputs().last().unwrap().clone();
+    let name = last.file_name().unwrap().to_string_lossy().into_owned();
+    let text = all_text(&app, 120, 30);
+    assert!(text.contains(&name), "{name} not visible in\n{text}");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(*opened.borrow(), vec![last]);
+    // and back up to the top: the first rows show again
+    for _ in 0..45 {
+        app.handle(ch('k'));
+    }
+    assert!(all_text(&app, 120, 30).contains("remote control"));
+}
+
+#[test]
+fn h_and_esc_leave_the_env_panel() {
+    for k in [ch('h'), key(KeyCode::Esc, KeyModifiers::NONE)] {
+        let (_t, mut app) = output_fixture(&[]);
+        assert_eq!(app.focus, ct::app::Focus::Env);
+        app.handle(k);
+        assert_eq!(app.focus, ct::app::Focus::Chat);
+    }
 }

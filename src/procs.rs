@@ -68,6 +68,16 @@ impl Procs {
         }
     }
 
+    /// Takes the chat's pane out. It counts as closed by ct.
+    pub fn take_chat(&mut self, id: &str) -> Option<Pane> {
+        let i = self.chats.iter().position(|(s, _, _)| s == id)?;
+        let (_, pane, _) = self.chats.remove(i);
+        self.unread.remove(id);
+        self.last_output.remove(id);
+        self.evicted.insert(id.to_string(), Instant::now());
+        Some(pane)
+    }
+
     /// True if ct dropped this chat's process less than `within` ago.
     pub fn closed_recently(&self, id: &str, within: std::time::Duration) -> bool {
         self.evicted.get(id).is_some_and(|t| t.elapsed() < within)

@@ -43,12 +43,19 @@ pub fn has_history(root: &Path, id: &str) -> bool {
 /// else claim the id with `--session-id` (claude rejects `--resume` for an id it never saw,
 /// and `--session-id` for one it has).
 pub fn start_spec(id: &str, cwd: &Path, root: &Path) -> PaneSpec {
-    if has_history(root, id) {
-        resume_spec(id, cwd)
-    } else {
-        claude(vec!["--session-id".into(), id.into()], cwd)
-    }
+    start_spec_with(id, cwd, has_history(root, id), false)
 }
+
+/// Like `start_spec`, with history already looked up, and `--remote-control` added when `remote` is set.
+pub fn start_spec_with(id: &str, cwd: &Path, has_history: bool, remote: bool) -> PaneSpec {
+    let mut spec = if has_history { resume_spec(id, cwd) } else { claude(vec!["--session-id".into(), id.into()], cwd) };
+    if remote {
+        spec.args.push(REMOTE_FLAG.into());
+    }
+    spec
+}
+
+pub const REMOTE_FLAG: &str = "--remote-control";
 
 /// Spec for restarting a pane that ran `old`: resume once history exists, otherwise run `old` again.
 pub fn restart_spec(old: &PaneSpec, id: &str, cwd: &Path, root: &Path) -> PaneSpec {

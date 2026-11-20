@@ -6,6 +6,8 @@ struct State {
     last: Option<String>,
     /// unix seconds when ct last exited
     closed_at: Option<u64>,
+    /// whether the environment panel is on
+    env_panel: Option<bool>,
 }
 
 fn read(path: &Path) -> State {
@@ -45,6 +47,26 @@ pub fn save_closed_at_to(path: &Path, secs: u64) {
     let mut st = read(path);
     st.closed_at = Some(secs);
     write(path, &st);
+}
+
+pub fn load_env_panel_from(path: &Path) -> bool {
+    read(path).env_panel.unwrap_or(false)
+}
+
+pub fn save_env_panel_to(path: &Path, on: bool) {
+    let mut st = read(path);
+    st.env_panel = Some(on);
+    write(path, &st);
+}
+
+pub fn load_env_panel() -> bool {
+    state_path().is_some_and(|p| load_env_panel_from(&p))
+}
+
+pub fn save_env_panel(on: bool) {
+    if let Some(p) = state_path() {
+        save_env_panel_to(&p, on);
+    }
 }
 
 pub fn now_secs() -> u64 {

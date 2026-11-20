@@ -3,7 +3,7 @@
 use crate::app::{App, Focus, Modal};
 use crate::pane::Pane;
 use crate::sidebar::Row;
-use crate::ui::{inner, layout, sidebar_lines};
+use crate::ui::{inner, sidebar_lines};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
@@ -25,7 +25,7 @@ impl App {
         match self.focus {
             Focus::Chat => self.open_chat.as_deref().and_then(|id| self.procs.chat_pane(id)),
             Focus::Shell => self.shell_cwd.as_deref().and_then(|c| self.procs.shell_pane(c)),
-            Focus::Sidebar => None,
+            Focus::Sidebar | Focus::Env => None,
         }
     }
 
@@ -80,7 +80,7 @@ impl App {
         if !self.cfg.mouse || !matches!(self.modal, Modal::None | Modal::Message(_)) {
             return;
         }
-        let l = layout(self.area, self.sidebar_visible, self.zoomed, self.focus);
+        let l = self.layout_for(self.area);
         let (x, y) = (m.column, m.row);
         let delta = match m.kind {
             MouseEventKind::ScrollUp => Some(true),
@@ -96,6 +96,11 @@ impl App {
                 Some(up) => self.sidebar.move_chats(if up { -1 } else { 1 }),
                 None => self.click_sidebar(r, y),
             }
+            return;
+        }
+        if delta.is_none() && l.env.is_some_and(|r| contains(r, x, y)) {
+            self.scroll_mode = false;
+            self.focus = Focus::Env;
             return;
         }
         let target = [(l.chat, Focus::Chat), (l.shell, Focus::Shell)]

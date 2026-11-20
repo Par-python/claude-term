@@ -5,7 +5,7 @@ pub struct HelpSection {
     pub rows: &'static [(&'static str, &'static str)],
 }
 
-static SECTIONS: [HelpSection; 4] = [
+static SECTIONS: [HelpSection; 5] = [
     HelpSection {
         title: "sidebar",
         rows: &[
@@ -27,6 +27,7 @@ static SECTIONS: [HelpSection; 4] = [
             ("prefix, then hjkl", "move focus"),
             ("prefix, then z", "zoom pane"),
             ("prefix, then b", "hide / show sidebar"),
+            ("prefix, then i", "environment panel"),
             ("prefix, then [", "scroll mode"),
             ("prefix, then ?", "this list"),
             ("prefix, then q", "quit"),
@@ -45,6 +46,10 @@ static SECTIONS: [HelpSection; 4] = [
     HelpSection {
         title: "fork prompt",
         rows: &[("f", "open a copy (fork)"), ("esc", "cancel")],
+    },
+    HelpSection {
+        title: "environment panel",
+        rows: &[("prefix, then l", "focus, h/esc back"), ("j / k", "down / up"), ("enter", "toggle / open")],
     },
 ];
 

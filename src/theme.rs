@@ -12,6 +12,9 @@ pub const SELECTION_BG: Color = Color::Rgb(0x2A, 0x28, 0x26);
 
 pub const SEL_EDGE: &str = "▌";
 pub const FOCUS_MARK: &str = "▸ ";
+pub const BAR_FULL: char = '▰';
+pub const BAR_EMPTY: char = '▱';
+pub const CHEVRON: &str = "›";
 pub const WORKING: char = '●';
 pub const UNREAD: char = '•';
 

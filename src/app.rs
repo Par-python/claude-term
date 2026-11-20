@@ -1,7 +1,8 @@
 use crate::config::Config;
+use crate::env_panel::{EnvPanel, locate_session};
 use crate::event::AppEvent;
 use crate::history::{ScanCache, SessionMeta, projects_root};
-use crate::launch::{fork_spec, new_chat_spec, restart_spec, start_spec};
+use crate::launch::{REMOTE_FLAG, fork_spec, has_history, new_chat_spec, restart_spec, start_spec_with};
 use crate::live::is_live_elsewhere;
 use crate::pane::{Notify, Pane, PaneId, PaneSpec};
 use crate::procs::Procs;
@@ -10,7 +11,7 @@ use crate::state;
 use crate::tree::{Chat, Folder, group, group_key};
 use crossterm::event::Event;
 use ratatui::layout::Rect;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime};
@@ -20,6 +21,7 @@ pub enum Focus {
     Sidebar,
     Chat,
     Shell,
+    Env,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +31,8 @@ pub enum Modal {
     NewFolder(String),
     ForkPrompt { id: String },
     Message(String),
+    /// the chat is working; `y` restarts it to toggle remote control
+    RemoteConfirm { id: String },
 }
 
 /// A session file touched this recently counts as in use by another claude.
@@ -49,6 +53,12 @@ pub struct App {
     pub modal: Modal,
     pub zoomed: bool,
     pub sidebar_visible: bool,
+    /// the user's toggle for the environment panel; see `env_visible`
+    pub env_on: bool,
+    pub env: EnvPanel,
+    /// chats launched (or to launch) with `--remote-control`
+    pub remote: HashSet<String>,
+    opener: Box<dyn FnMut(&Path)>,
     pub open_chat: Option<String>,
     pub pending_new: Vec<(PathBuf, String)>,
     /// folders as history last gave them, empty chats included
@@ -73,7 +83,10 @@ pub struct App {
     scan_req: Option<Sender<()>>,
     cache: ScanCache,
     test_script: String,
+    fail_spawn: bool,
     last_spec: Option<PaneSpec>,
+    /// how each chat was last started, before test mode swaps the program
+    specs: HashMap<String, PaneSpec>,
     /// when the previous ct run exited, from state.toml
     closed_at: Option<SystemTime>,
 }
@@ -87,6 +100,10 @@ impl App {
             modal: Modal::None,
             zoomed: false,
             sidebar_visible: true,
+            env_on: false,
+            env: EnvPanel::new(),
+            remote: HashSet::new(),
+            opener: Box::new(open_path),
             open_chat: None,
             pending_new: vec![],
             raw_folders: vec![],
@@ -106,7 +123,9 @@ impl App {
             scan_req: None,
             cache: ScanCache::default(),
             test_script: "sleep 5".into(),
+            fail_spawn: false,
             last_spec: None,
+            specs: HashMap::new(),
             closed_at: None,
         };
         app.apply_folders(folders);
@@ -135,6 +154,16 @@ impl App {
         self.root = root;
     }
 
+    /// Replaces what opens an output file (tests record the path instead of running `open`).
+    pub fn set_opener(&mut self, f: impl FnMut(&Path) + 'static) {
+        self.opener = Box::new(f);
+    }
+
+    /// Makes the next chat starts fail (tests).
+    pub fn set_fail_spawn(&mut self, on: bool) {
+        self.fail_spawn = on;
+    }
+
     /// Changes what chats run in test mode: `sh -c <script>`.
     pub fn set_test_script(&mut self, script: &str) {
         self.test_script = script.into();
@@ -158,6 +187,7 @@ impl App {
 
     /// Returns false when the app should quit.
     pub fn handle(&mut self, ev: AppEvent) -> bool {
+        let tick = matches!(ev, AppEvent::Tick);
         match ev {
             AppEvent::Input(Event::Key(k)) => {
                 if k.kind != crossterm::event::KeyEventKind::Release && !self.on_key(k) {
@@ -168,7 +198,12 @@ impl App {
             AppEvent::Input(Event::Paste(text)) => self.on_paste(&text),
             AppEvent::Input(Event::Mouse(m)) => self.on_mouse(m),
             AppEvent::Input(_) => {}
-            AppEvent::Pty(Notify::Output(id)) => self.procs.on_output(id, self.open_chat.as_deref()),
+            AppEvent::Pty(Notify::Output(id)) => {
+                self.procs.on_output(id, self.open_chat.as_deref());
+                if self.env_visible() && self.open_chat.as_deref().and_then(|c| self.procs.chat_pane(c)).is_some_and(|p| p.id == id) {
+                    self.env.poll_throttled();
+                }
+            }
             AppEvent::Pty(Notify::Exited(_)) => {}
             AppEvent::HistoryChanged => match &self.scan_req {
                 Some(req) => {
@@ -180,13 +215,88 @@ impl App {
                 }
             },
             AppEvent::Scanned(metas) => self.apply_scan(metas),
-            AppEvent::Tick => {}
+            AppEvent::Tick => self.poll_env(),
+            AppEvent::Connectors(c) => self.env.connectors = c,
+            AppEvent::GitBranch { chat, branch } => {
+                if self.env.chat.as_deref() == Some(chat.as_str()) {
+                    self.env.branch = branch;
+                }
+            }
             AppEvent::Quit => return false,
         }
         self.refresh_visibility();
+        // the panel can disappear under focus (toggled off, zoomed, window narrowed)
+        if self.focus == Focus::Env && !self.env_visible() {
+            self.focus = Focus::Chat;
+        }
+        self.sync_env(tick);
         self.resize_panes();
         self.sync_sidebar_scroll();
         true
+    }
+
+    // ---- environment panel ----
+
+    /// Shown when toggled on, the terminal is at least 100 columns wide, and nothing is zoomed.
+    pub fn env_visible(&self) -> bool {
+        self.env_on && !self.zoomed && self.area.width >= 100
+    }
+
+    /// Sets the toggle without saving it (startup).
+    pub fn set_env_panel(&mut self, on: bool) {
+        self.env_on = on;
+    }
+
+    pub(crate) fn toggle_env(&mut self) {
+        self.env_on = !self.env_on;
+        if self.persist {
+            state::save_env_panel(self.env_on);
+        }
+    }
+
+    pub(crate) fn layout_for(&self, area: Rect) -> crate::ui::Layout {
+        crate::ui::layout(area, self.sidebar_visible, self.zoomed, self.focus, self.env_visible())
+    }
+
+    /// Follows the open chat: new tracker and branch read on a switch, and a retry while the
+    /// session file doesn't exist yet. Results for a chat that is no longer open are dropped on arrival.
+    fn sync_env(&mut self, tick: bool) {
+        let switched = self.env.chat != self.open_chat;
+        if switched {
+            self.env.switch(self.open_chat.clone());
+        }
+        let Some(id) = self.env.chat.clone() else { return };
+        // only while the panel shows, and then on a switch or a tick (the file may not exist yet)
+        if self.env.tracker.is_none() && self.env_visible() && (switched || tick) {
+            self.env.lookups += 1;
+            let cwd = self.find_chat(&id).map(|c| c.meta.cwd.clone());
+            let found = cwd.and_then(|c| locate_session(&self.root, &c, &id, tick));
+            if let Some(path) = found {
+                self.env.tracker = Some(crate::env::ChatTracker::new(path));
+                self.poll_env();
+            }
+        }
+        if self.env_visible() && self.env.branch_due() {
+            let Some(cwd) = self.find_chat(&id).map(|c| c.meta.cwd.clone()) else { return };
+            let flag = self.env.branch_started();
+            // tests inject the branch with AppEvent::GitBranch instead of running git
+            if self.test_mode {
+                flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let branch = crate::env::git_branch(&cwd);
+                flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                let _ = tx.send(AppEvent::GitBranch { chat: id, branch });
+            });
+        }
+    }
+
+    fn poll_env(&mut self) {
+        if self.env_visible() {
+            self.env.poll();
+        }
     }
 
     fn visibility_now(&self) -> Visibility {
@@ -213,7 +323,7 @@ impl App {
 
     /// Keeps the sidebar's scroll position in step with its cursor and the window height.
     fn sync_sidebar_scroll(&mut self) {
-        let l = crate::ui::layout(self.area, self.sidebar_visible, self.zoomed, self.focus);
+        let l = self.layout_for(self.area);
         if let Some(r) = l.sidebar {
             let rows = self.sidebar.rows();
             let h = crate::ui::inner(r).height as usize;
@@ -303,7 +413,7 @@ impl App {
         } else if self.live_elsewhere(&id) {
             self.modal = Modal::ForkPrompt { id };
         } else {
-            let spec = start_spec(&id, &cwd, &self.root);
+            let spec = start_spec_with(&id, &cwd, has_history(&self.root, &id), self.remote.contains(&id));
             self.start_chat(id, spec, cwd, true);
         }
     }
@@ -378,24 +488,35 @@ impl App {
 
     fn adapt(&self, spec: PaneSpec) -> PaneSpec {
         if self.test_mode {
-            PaneSpec { program: "sh".into(), args: vec!["-c".into(), self.test_script.clone()], cwd: spec.cwd }
+            PaneSpec { program: "sh".into(), args: ["-c", self.test_script.as_str(), "claude"].into_iter().map(String::from).chain(spec.args).collect(), cwd: spec.cwd }
         } else {
             spec
         }
     }
 
-    fn start_chat(&mut self, key: String, spec: PaneSpec, cwd: PathBuf, save: bool) {
+    /// Returns whether the pane started.
+    fn start_chat(&mut self, key: String, spec: PaneSpec, cwd: PathBuf, save: bool) -> bool {
         self.last_spec = Some(spec.clone());
+        self.specs.insert(key.clone(), spec.clone());
         let spec = self.adapt(spec);
         let (rows, cols) = self.pane_size(Focus::Chat);
         let id = self.procs.next_id();
-        match Pane::spawn(id, spec, rows, cols, self.tx.clone()) {
+        let spawned = if self.test_mode && self.fail_spawn {
+            Err(anyhow::anyhow!("test spawn failure"))
+        } else {
+            Pane::spawn(id, spec, rows, cols, self.tx.clone())
+        };
+        match spawned {
             Ok(p) => {
                 self.sizes.insert(id, (rows, cols));
                 self.procs.insert_chat(key.clone(), p);
                 self.show(key, cwd, save);
+                true
             }
-            Err(e) => self.modal = Modal::Message(format!("could not start claude: {e}")),
+            Err(e) => {
+                self.modal = Modal::Message(format!("could not start claude: {e}"));
+                false
+            }
         }
     }
 
@@ -436,6 +557,14 @@ impl App {
                 .map(|p| restart_spec(&p.spec, id, &p.spec.cwd, &self.root)),
             _ => None,
         };
+        let new_spec = new_spec.map(|mut s| {
+            if let (Some(id), false) = (&self.open_chat, s.args.iter().any(|a| a == REMOTE_FLAG))
+                && self.remote.contains(id)
+            {
+                s.args.push(REMOTE_FLAG.into());
+            }
+            s
+        });
         if let Some(s) = &new_spec {
             self.last_spec = Some(s.clone());
         }
@@ -455,12 +584,80 @@ impl App {
         }
     }
 
+    /// Enter in the environment panel on the row under its cursor.
+    pub(crate) fn env_enter(&mut self) {
+        use crate::env_panel::EnvRow;
+        let last = self.env.row_count() - 1;
+        match self.env.row_at(self.env.cursor.min(last)) {
+            EnvRow::Remote => {
+                if let Some(id) = self.open_chat.clone() {
+                    self.toggle_remote(id);
+                }
+            }
+            EnvRow::Connectors => self.env.expanded = !self.env.expanded,
+            EnvRow::Output(i) => {
+                let Some(p) = self.env.outputs().get(i).cloned() else { return };
+                if p.exists() {
+                    (self.opener)(&p);
+                } else {
+                    self.modal = Modal::Message("file no longer exists".into());
+                }
+            }
+        }
+    }
+
+    /// Flips remote control for a chat. A chat that is writing asks first; one that isn't running
+    /// only has its stored choice flipped, for its next start.
+    fn toggle_remote(&mut self, id: String) {
+        let pane = self.procs.chat_pane(&id).map(|p| p.exited.load(std::sync::atomic::Ordering::SeqCst));
+        match pane {
+            None => {
+                if !self.remote.remove(&id) {
+                    self.remote.insert(id);
+                }
+            }
+            Some(false) if self.procs.mark(&id) == crate::procs::Mark::Working => self.modal = Modal::RemoteConfirm { id },
+            Some(_) => self.restart_with_remote_flipped(&id),
+        }
+    }
+
+    /// Ends the chat's claude (waiting until it is gone, so two never share a session) and starts a
+    /// fresh one with remote control flipped. The stored choice changes only if the new one starts.
+    pub(crate) fn restart_with_remote_flipped(&mut self, id: &str) {
+        let Some(cwd) = self.find_chat(id).map(|c| c.meta.cwd.clone()) else { return };
+        let on = !self.remote.contains(id);
+        let base = self.specs.get(id).cloned();
+        if let Some(mut pane) = self.procs.take_chat(id)
+            && let Some(g) = pane.take_group()
+        {
+            crate::pane::terminate(vec![g], crate::pane::GRACE);
+        }
+        // history means resume; otherwise keep how it was started (a fork keeps --resume --fork-session)
+        let mut spec = match base {
+            Some(b) if !has_history(&self.root, id) => b,
+            _ => start_spec_with(id, &cwd, has_history(&self.root, id), false),
+        };
+        spec.args.retain(|a| a != REMOTE_FLAG);
+        if on {
+            spec.args.push(REMOTE_FLAG.into());
+        }
+        let focus = self.focus;
+        if self.start_chat(id.to_string(), spec, cwd, false) {
+            if on {
+                self.remote.insert(id.to_string());
+            } else {
+                self.remote.remove(id);
+            }
+        }
+        self.focus = focus;
+    }
+
     pub(crate) fn focused_exited(&self) -> bool {
         use std::sync::atomic::Ordering;
         match self.focus {
             Focus::Chat => self.open_chat.as_deref().and_then(|id| self.procs.chat_pane(id)),
             Focus::Shell => self.shell_cwd.as_deref().and_then(|c| self.procs.shell_pane(c)),
-            Focus::Sidebar => None,
+            Focus::Sidebar | Focus::Env => None,
         }
         .is_some_and(|p| p.exited.load(Ordering::SeqCst))
     }
@@ -475,7 +672,7 @@ impl App {
                 Some(c) => self.procs.shell_pane_mut(c),
                 None => None,
             },
-            Focus::Sidebar => None,
+            Focus::Sidebar | Focus::Env => None,
         };
         if let Some(p) = pane {
             // typing goes to the live screen
@@ -526,7 +723,7 @@ impl App {
 
     /// True when a pane on screen is mid synchronized-output block, so drawing should wait.
     pub fn hold_draw(&self) -> bool {
-        let l = crate::ui::layout(self.area, self.sidebar_visible, self.zoomed, self.focus);
+        let l = self.layout_for(self.area);
         let chat = l.chat.and(self.open_chat.as_deref()).and_then(|id| self.procs.chat_pane(id));
         let shell = l.shell.and(self.shell_cwd.as_deref()).and_then(|c| self.procs.shell_pane(c));
         chat.into_iter().chain(shell).any(|p| p.in_sync_block())
@@ -535,14 +732,14 @@ impl App {
     // ---- sizing ----
 
     fn pane_size(&self, which: Focus) -> (u16, u16) {
-        let l = crate::ui::layout(self.area, self.sidebar_visible, self.zoomed, which);
+        let l = crate::ui::layout(self.area, self.sidebar_visible, self.zoomed, which, self.env_visible());
         let r = if which == Focus::Chat { l.chat } else { l.shell };
         r.map(crate::ui::inner).map_or((24, 80), |i| (i.height, i.width))
     }
 
     /// Resizes each visible pane to its inner rect, only when the size changed.
     pub fn resize_panes(&mut self) {
-        let l = crate::ui::layout(self.area, self.sidebar_visible, self.zoomed, self.focus);
+        let l = self.layout_for(self.area);
         if let (Some(r), Some(id)) = (l.chat, self.open_chat.as_deref()) {
             let i = crate::ui::inner(r);
             if let Some(p) = self.procs.chat(id)
@@ -559,6 +756,16 @@ impl App {
                     self.sizes.insert(p.id, (i.height, i.width));
                 }
         }
+    }
+}
+
+/// Runs `open <path>` without waiting on it here; a thread reaps it.
+fn open_path(p: &Path) {
+    use std::process::{Command, Stdio};
+    if let Ok(mut c) = Command::new("open").arg(p).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        std::thread::spawn(move || {
+            let _ = c.wait();
+        });
     }
 }
 

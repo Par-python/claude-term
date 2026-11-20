@@ -83,6 +83,7 @@ fn prefix_commands() {
     assert_eq!(p('b'), Some(PrefixCmd::ToggleSidebar));
     assert_eq!(p('q'), Some(PrefixCmd::Quit));
     assert_eq!(p('?'), Some(PrefixCmd::Help));
+    assert_eq!(p('i'), Some(PrefixCmd::EnvPanel));
     assert_eq!(p('x'), None);
 }
 

@@ -96,3 +96,13 @@ fn restart_spec_switches_to_resume_once_history_exists() {
     std::fs::write(root.join("proj").join(format!("{nid}.jsonl")), "{}\n").unwrap();
     assert_eq!(restart_spec(&new, &nid, cwd, root).args, vec!["--resume".to_string(), nid]);
 }
+
+#[test]
+fn start_spec_with_remote() {
+    let cwd = Path::new("/work/a");
+    assert_eq!(start_spec_with("abc", cwd, true, false).args, vec!["--resume", "abc"]);
+    assert_eq!(start_spec_with("abc", cwd, true, true).args, vec!["--resume", "abc", "--remote-control"]);
+    assert_eq!(start_spec_with("abc", cwd, false, true).args, vec!["--session-id", "abc", "--remote-control"]);
+    let root = Path::new("/no/such/root");
+    assert_eq!(start_spec("abc", cwd, root).args, vec!["--session-id", "abc"]);
+}

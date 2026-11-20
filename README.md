@@ -18,8 +18,31 @@ the claude desktop app is nice, but i wanted to live in one terminal. `ct` lists
 - a real `claude` pane and a shell pane per chat, kept running in the background
 - activity dots that show which chats are printing or have something new to read
 - scrollback, zoom, mouse support and a tmux-style prefix key
+- an environment panel (`prefix, then i`) with the machine, folder, git branch, remote control, context use, connectors and the files the chat wrote
 - `prefix, then ?` shows all keys in a popup
 - opens the chat you had last, and asks before opening the same chat twice (fork instead)
+
+## environment panel
+
+`prefix, then i` opens a column on the right with facts about the open chat (it needs 100+ columns and hides while a pane is zoomed; `prefix, then i` again closes it). ct remembers whether it was open.
+
+![the environment panel](assets/env.svg)
+
+- `this computer · name`: the short hostname of this machine
+- `folder · parent`: the chat's folder and where it lives (`~` is your home)
+- the git branch of that folder, `detached`, or `no git`
+- `remote control`: `on` or `off`
+- `context`: how much of the context window the chat has used, with a small bar. it turns orange at 80% or more. `–` until there is something to read
+- `connectors`: a summary of `claude mcp list`: `checking…` while it runs in the background, `N connected`, `N to reconnect` when some need auth or failed, or `unavailable`
+- `OUTPUTS`: the files the chat wrote or edited (Write, Edit and similar tools), newest first
+
+focus it with `prefix, then l` and leave with `h` or `esc`. `j` / `k` move over remote control, connectors and each output file, and `enter` acts on the row:
+
+- remote control: turns it on or off. this restarts that chat's claude (with `--remote-control` when on). if the chat is in the middle of a reply, ct asks first. if ct has no claude for that chat, it just remembers the choice for the next start
+- connectors: expands or collapses the list, one line per connector (`connected`, `needs auth` or `failed`)
+- an output file: opens it with the macOS `open` command
+
+![the connectors expanded](assets/env-connectors.svg)
 
 ## requirements
 
@@ -79,6 +102,8 @@ everywhere:
 | prefix, then `h` `j` `k` `l` | move focus between sidebar, claude and shell |
 | prefix, then `z` | zoom the focused pane |
 | prefix, then `b` | show / hide the sidebar |
+| prefix, then `i` | show / hide the environment panel (needs 100+ columns) |
+| prefix, then `l` | focus the environment panel (`h` or `esc` goes back). there `j` / `k` pick a row and `enter` toggles remote control (restarts claude with `--remote-control`, asks first if it is working), expands connectors, or opens an output file |
 | prefix, then `[` | scroll mode on the focused pane (see below) |
 | prefix, then `?` | show all keys |
 | prefix, then `q` | quit (closes every child process) |

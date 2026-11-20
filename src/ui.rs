@@ -11,25 +11,35 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use std::sync::atomic::Ordering;
 
 const SIDEBAR_WIDTH: u16 = 32;
+pub const ENV_WIDTH: u16 = 34;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
     pub sidebar: Option<Rect>,
     pub chat: Option<Rect>,
     pub shell: Option<Rect>,
+    /// the environment column, title row included; its divider sits one column to the left
+    pub env: Option<Rect>,
     pub status: Rect,
 }
 
 /// Sidebar 32 cols on the left, then a one column divider, then chat 70% over shell 30% with a one row
 /// divider between them, and one status row at the bottom. Every pane rect includes its title row.
 /// Zoom gives the whole right side to the focused pane.
-pub fn layout(area: Rect, sidebar_visible: bool, zoomed: bool, focus: Focus) -> Layout {
+pub fn layout(area: Rect, sidebar_visible: bool, zoomed: bool, focus: Focus, env_visible: bool) -> Layout {
     let status = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, area.height.min(1));
     let body = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
     let sw = if sidebar_visible { SIDEBAR_WIDTH.min(area.width / 2) } else { 0 };
     let sidebar = sidebar_visible.then(|| Rect::new(body.x, body.y, sw, body.height));
     let taken = if sidebar_visible { (sw + 1).min(body.width) } else { 0 };
-    let right = Rect::new(body.x + taken, body.y, body.width - taken, body.height);
+    let mut right = Rect::new(body.x + taken, body.y, body.width - taken, body.height);
+    // the env column takes 34 cols plus its divider off the right side
+    let env = (env_visible && !zoomed).then(|| {
+        let ew = ENV_WIDTH.min(right.width.saturating_sub(1));
+        let r = Rect::new(right.right() - ew, right.y, ew, right.height);
+        right.width -= (ew + 1).min(right.width);
+        r
+    });
     let (chat, shell) = match (zoomed, focus) {
         (true, Focus::Chat) => (Some(right), None),
         (true, Focus::Shell) => (None, Some(right)),
@@ -42,7 +52,7 @@ pub fn layout(area: Rect, sidebar_visible: bool, zoomed: bool, focus: Focus) -> 
             )
         }
     };
-    Layout { sidebar, chat, shell, status }
+    Layout { sidebar, chat, shell, env, status }
 }
 
 /// The content area of a pane or the sidebar: the rect minus its title row.
@@ -101,7 +111,7 @@ pub fn sidebar_lines(rows: &[Row], scroll: usize, cursor: usize, height: usize) 
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let l = layout(f.area(), app.sidebar_visible, app.zoomed, app.focus);
+    let l = app.layout_for(f.area());
     if let Some(r) = l.sidebar {
         draw_sidebar(f, r, app);
         draw_vline(f, r.right(), r.y, r.height);
@@ -131,6 +141,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let (Some(c), Some(_)) = (l.chat, l.shell) {
         draw_hline(f, c.x, c.bottom(), c.width, l.status.y);
     }
+    if let Some(r) = l.env {
+        draw_vline(f, r.x.saturating_sub(1), r.y, r.height);
+        crate::env_ui::draw(f, r, app);
+    }
     draw_status(f, l.status, app);
     if app.help_open() {
         draw_help(f, f.area());
@@ -157,7 +171,7 @@ fn draw_hline(f: &mut Frame, x: u16, y: u16, w: u16, limit: u16) {
 }
 
 /// The one-row title at the top of a pane: `▸ ` and a bright title when focused, a dim title when not.
-fn draw_title(f: &mut Frame, area: Rect, title: &str, focused: bool) {
+pub(crate) fn draw_title(f: &mut Frame, area: Rect, title: &str, focused: bool) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -318,6 +332,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         Modal::Message(m) if m.starts_with("no folders yet") => Line::styled(m.clone(), Style::default().fg(theme::TEXT)),
         Modal::Message(m) => Line::styled(m.clone(), theme::warn()),
         Modal::Filter(s) => Line::styled(format!("/{s}"), Style::default().fg(theme::TEXT)),
+        Modal::RemoteConfirm { .. } => Line::styled("restart claude to toggle remote control? y / esc", theme::warn()),
         Modal::NewFolder(s) => Line::styled(format!("new folder path: {s}"), Style::default().fg(theme::TEXT)),
         Modal::ForkPrompt { .. } => Line::styled("chat open elsewhere: f = open a copy, esc = cancel", theme::warn()),
         Modal::None if app.focused_pane().is_some_and(|p| p.scroll_offset() > 0) => {
@@ -374,7 +389,7 @@ fn draw_help(f: &mut Frame, screen: Rect) {
     let single = help_column(&s.iter().collect::<Vec<_>>());
     let mut cols = vec![single];
     if cols[0].0.len() > max_h {
-        let two = vec![help_column(&[&s[0], &s[2]]), help_column(&[&s[1], &s[3]])];
+        let two = vec![help_column(&[&s[0], &s[2]]), help_column(&[&s[1], &s[3], &s[4]])];
         if two.iter().map(|c| c.1).sum::<usize>() + HELP_GUTTER + 4 <= max_w {
             cols = two;
         }

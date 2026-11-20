@@ -55,11 +55,14 @@ fn main() -> anyhow::Result<()> {
     if let Some(c) = load_closed_at() {
         app.set_closed_at(c);
     }
+    app.set_env_panel(ct::state::load_env_panel());
+    app.env.host = ct::env::hostname_short();
 
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore();
         save_closed_now();
+        ct::env::kill_running_mcp();
         prev(info);
         // a panic on any thread ends the app; children die when their ptys close
         std::process::exit(101);
@@ -83,6 +86,7 @@ fn main() -> anyhow::Result<()> {
     restore();
     // hang up every child's process group, kill what ignores it, and only then exit
     app.shutdown();
+    ct::env::kill_running_mcp();
     drop(app);
     save_closed_now();
     result
@@ -121,6 +125,7 @@ fn run(app: &mut App, cache: &mut ScanCache, tx: &std::sync::mpsc::Sender<AppEve
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     });
+    ct::env::spawn_mcp_worker(ct::env::real_mcp_runner(), tx.clone(), std::time::Duration::from_secs(300));
     // keep alive until we return; a missing projects dir just means no live updates
     app.set_scanner(spawn_scanner(projects_root(), std::mem::take(cache), tx.clone()));
     let _watcher = spawn_watcher(&projects_root(), tx.clone()).ok();
