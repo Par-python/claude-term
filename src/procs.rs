@@ -104,6 +104,12 @@ impl Procs {
         self.chats.iter().any(|(s, p, _)| s == id && !p.exited.load(Ordering::SeqCst))
     }
 
+    /// How many running chats there are besides the focused one.
+    pub fn running_besides(&self, focused: Option<&str>) -> usize {
+        use std::sync::atomic::Ordering;
+        self.chats.iter().filter(|(s, p, _)| Some(s.as_str()) != focused && !p.exited.load(Ordering::SeqCst)).count()
+    }
+
     /// Records output from a pane. A background chat that writes becomes unread.
     pub fn on_output(&mut self, pane: PaneId, focused_chat: Option<&str>) {
         self.on_output_at(pane, focused_chat, Instant::now());

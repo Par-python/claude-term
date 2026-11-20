@@ -39,7 +39,7 @@ fn wait_until(p: &Arc<Mutex<vt100::Parser>>, secs: u64, what: &str, ok: impl Fn(
 
 /// index of the row whose relative number is 0 (the cursor row)
 fn zero_row(rows: &[String]) -> Option<usize> {
-    rows.iter().position(|r| r.contains("│  0 ") || r.trim_start_matches('│').trim_start().starts_with("0 "))
+    rows.iter().position(|r| r.split('│').next().unwrap_or("").trim_start_matches(['▌', ' ']).starts_with("0 "))
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn starts_navigates_and_quits_cleanly() {
     });
 
     let rows = wait_until(&parser, 5, "folders and titles", |rows| {
-        let all = rows.join("\n");
+        let all = rows.join("\n").to_lowercase();
         ["alphadir", "betadir", "first chat title", "second chat title"].iter().all(|s| all.contains(s))
     });
     // the cursor starts on a folder header, so no chat shows 0 yet

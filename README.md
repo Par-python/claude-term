@@ -12,12 +12,13 @@ the claude desktop app is nice, but i wanted to live in one terminal. `ct` lists
 
 ## features
 
-- sidebar of all your chats, grouped by folder, with live updates as sessions change
+- sidebar of every chat with something in it, grouped by folder, with live updates as sessions change
 - vim motions: `j`/`k`, counts (`3j`), `gg`/`G`, `{`/`}` between folders, `/` to filter
 - relative numbers and `alt+1..9` to jump to a chat in one keystroke
 - a real `claude` pane and a shell pane per chat, kept running in the background
 - activity dots that show which chats are printing or have something new to read
 - scrollback, zoom, mouse support and a tmux-style prefix key
+- `prefix, then ?` shows all keys in a popup
 - opens the chat you had last, and asks before opening the same chat twice (fork instead)
 
 ## requirements
@@ -79,11 +80,16 @@ everywhere:
 | prefix, then `z` | zoom the focused pane |
 | prefix, then `b` | show / hide the sidebar |
 | prefix, then `[` | scroll mode on the focused pane (see below) |
+| prefix, then `?` | show all keys |
 | prefix, then `q` | quit (closes every child process) |
+
+![the keys popup](assets/keys.svg)
 
 when you open a chat that is already open in another claude, ct asks first: `f` opens a copy (a fork), `esc` cancels.
 
-the dots next to a chat only show for chats ct started. `●` (green) means it is printing output right now. `•` (yellow) means it printed while you were looking at another chat and has gone quiet since, so there is something new to read. focusing the chat clears it.
+the dots next to a chat only show for chats ct started. `●` means it is printing output right now. `•` means it printed while you were looking at another chat and has gone quiet since, so there is something new to read. both use the orange accent. focusing the chat clears it.
+
+chats with nothing in them yet are hidden unless ct is running them, and the status line shows how many other chats are running.
 
 the prefix is `ctrl+space` by default. it can also be `ctrl+a` ... `ctrl+z`, except `ctrl+h`, `ctrl+i`, `ctrl+j` and `ctrl+m` (and `ctrl+[`): terminals send those as backspace, tab, newline, enter and esc, so ct can't tell them from the plain keys. ct ignores those and uses `ctrl+space` instead. every other key goes straight to claude or the shell when that pane has focus. when a pane's process has exited, press `enter` in it to restart.
 
@@ -99,8 +105,9 @@ scroll mode (prefix, then `[`) is the keyboard way to scroll the focused pane:
 
 | key | does |
 | --- | --- |
-| `k` / `j` | one line back / forward |
+| `k` / `j` (or `up` / `down`) | one line back / forward |
 | `ctrl+u` / `ctrl+d` | half a page back / forward |
+| `pgup` / `pgdn` | a full page back / forward |
 | `g` / `G` | oldest / newest |
 | `q` or `esc` | leave and jump to the bottom |
 

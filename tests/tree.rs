@@ -9,6 +9,7 @@ fn meta(id: &str, cwd: &str, secs: u64) -> SessionMeta {
         cwd: PathBuf::from(cwd),
         title: id.into(),
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+        empty: false,
     }
 }
 

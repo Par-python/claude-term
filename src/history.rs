@@ -14,6 +14,8 @@ pub struct SessionMeta {
     pub cwd: PathBuf,
     pub title: String,
     pub modified: SystemTime,
+    /// no custom title and no user message yet
+    pub empty: bool,
 }
 
 pub fn projects_root() -> PathBuf {
@@ -124,11 +126,12 @@ impl Parsed {
 
     fn meta(&self, id: &str, modified: SystemTime) -> Option<SessionMeta> {
         let cwd = self.cwd.clone()?;
+        let empty = self.custom.is_none() && self.first_user.is_none();
         let title = match &self.custom {
             Some(t) => t.clone(),
-            None => truncate_title(self.first_user.as_deref().unwrap_or("(untitled)")),
+            None => truncate_title(self.first_user.as_deref().unwrap_or("new chat")),
         };
-        Some(SessionMeta { id: id.to_string(), cwd, title, modified })
+        Some(SessionMeta { id: id.to_string(), cwd, title, modified, empty })
     }
 }
 

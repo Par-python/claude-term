@@ -224,3 +224,50 @@ fn a_shrunk_or_rewritten_file_is_parsed_from_scratch() {
     assert_eq!(c.scan(d.path())[0].title, "yo");
     assert_eq!(c.bytes_read - before, same.len() as u64);
 }
+
+#[test]
+fn empty_session_marked_empty() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "e1.jsonl", "{\"type\":\"summary\",\"cwd\":\"/Users/me/proj\"}\n");
+    let m = parse_session(&p).unwrap();
+    assert!(m.empty);
+    assert_eq!(m.title, "new chat");
+}
+
+#[test]
+fn session_with_user_message_not_empty() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "e2.jsonl", "{\"type\":\"user\",\"cwd\":\"/a\",\"message\":{\"content\":\"hello\"}}\n");
+    let m = parse_session(&p).unwrap();
+    assert!(!m.empty);
+    assert_eq!(m.title, "hello");
+}
+
+#[test]
+fn session_with_custom_title_not_empty() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "e3.jsonl", "{\"cwd\":\"/a\"}\n{\"type\":\"custom-title\",\"customTitle\":\"Named\"}\n");
+    assert!(!parse_session(&p).unwrap().empty);
+}
+
+#[test]
+fn empty_flips_when_the_file_grows() {
+    use std::io::Write;
+    let d = tempfile::tempdir().unwrap();
+    let p = write(&d.path().join("proj"), "e4.jsonl", "{\"cwd\":\"/a\"}\n");
+    let mut c = ScanCache::default();
+    assert!(c.scan(d.path())[0].empty);
+    let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+    f.write_all(b"{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n").unwrap();
+    drop(f);
+    let m = c.scan(d.path());
+    assert!(!m[0].empty);
+    assert_eq!(m[0].title, "hi");
+    // and a custom title alone does it too
+    let p2 = write(&d.path().join("proj"), "e5.jsonl", "{\"cwd\":\"/a\"}\n");
+    assert!(c.scan(d.path()).iter().find(|m| m.id == "e5").unwrap().empty);
+    let mut f = fs::OpenOptions::new().append(true).open(&p2).unwrap();
+    f.write_all(b"{\"type\":\"custom-title\",\"customTitle\":\"T\"}\n").unwrap();
+    drop(f);
+    assert!(!c.scan(d.path()).iter().find(|m| m.id == "e5").unwrap().empty);
+}

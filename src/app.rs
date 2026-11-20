@@ -34,6 +34,14 @@ pub enum Modal {
 /// A session file touched this recently counts as in use by another claude.
 const RECENT: Duration = Duration::from_secs(30);
 
+/// What decides whether an empty chat shows: where the user is, and what ct runs.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Visibility {
+    open: Option<String>,
+    selected: Option<String>,
+    running: Vec<bool>,
+}
+
 pub struct App {
     pub sidebar: Sidebar,
     pub procs: Procs,
@@ -43,6 +51,10 @@ pub struct App {
     pub sidebar_visible: bool,
     pub open_chat: Option<String>,
     pub pending_new: Vec<(PathBuf, String)>,
+    /// folders as history last gave them, empty chats included
+    raw_folders: Vec<Folder>,
+    /// what the last sidebar build depended on besides history
+    visibility: Visibility,
     /// folder whose shell is shown below the chat
     pub shell_cwd: Option<PathBuf>,
     pub area: Rect,
@@ -50,6 +62,7 @@ pub struct App {
     pub(crate) tx: Sender<AppEvent>,
     pub(crate) awaiting_prefix: bool,
     pub(crate) scroll_mode: bool,
+    pub(crate) help: bool,
     root: PathBuf,
     // test switches: no real claude/shell, no ps, no state file
     test_mode: bool,
@@ -67,8 +80,8 @@ pub struct App {
 
 impl App {
     pub fn new(cfg: Config, folders: Vec<Folder>, tx: Sender<AppEvent>) -> App {
-        App {
-            sidebar: Sidebar::new(folders),
+        let mut app = App {
+            sidebar: Sidebar::new(vec![]),
             procs: Procs::new(cfg.max_background),
             focus: Focus::Sidebar,
             modal: Modal::None,
@@ -76,12 +89,15 @@ impl App {
             sidebar_visible: true,
             open_chat: None,
             pending_new: vec![],
+            raw_folders: vec![],
+            visibility: Visibility::default(),
             shell_cwd: None,
             area: Rect::new(0, 0, 80, 24),
             cfg,
             tx,
             awaiting_prefix: false,
             scroll_mode: false,
+            help: false,
             root: projects_root(),
             test_mode: false,
             check_ps: true,
@@ -92,7 +108,9 @@ impl App {
             test_script: "sleep 5".into(),
             last_spec: None,
             closed_at: None,
-        }
+        };
+        app.apply_folders(folders);
+        app
     }
 
     /// Spawns nothing on its own. Chats it opens run `sh -c "sleep 5"` and no
@@ -165,16 +183,41 @@ impl App {
             AppEvent::Tick => {}
             AppEvent::Quit => return false,
         }
+        self.refresh_visibility();
         self.resize_panes();
         self.sync_sidebar_scroll();
         true
+    }
+
+    fn visibility_now(&self) -> Visibility {
+        let running = self
+            .raw_folders
+            .iter()
+            .flat_map(|f| f.chats.iter())
+            .filter(|c| c.meta.empty)
+            .map(|c| c.meta.id.as_str())
+            .chain(self.pending_new.iter().map(|(_, id)| id.as_str()))
+            .map(|id| self.procs.is_running(id))
+            .collect();
+        Visibility { open: self.open_chat.clone(), selected: self.sidebar.selected_chat().map(|c| c.meta.id.clone()), running }
+    }
+
+    /// Re-applies the folders when a chat started or stopped running, or the user moved
+    /// off one, so empty rows appear and disappear without waiting for a scan.
+    fn refresh_visibility(&mut self) {
+        if self.visibility_now() != self.visibility {
+            let raw = self.raw_folders.clone();
+            self.apply_folders(raw);
+        }
     }
 
     /// Keeps the sidebar's scroll position in step with its cursor and the window height.
     fn sync_sidebar_scroll(&mut self) {
         let l = crate::ui::layout(self.area, self.sidebar_visible, self.zoomed, self.focus);
         if let Some(r) = l.sidebar {
-            self.sidebar.ensure_visible(crate::ui::inner(r).height as usize);
+            let rows = self.sidebar.rows();
+            let h = crate::ui::inner(r).height as usize;
+            self.sidebar.scroll = crate::ui::scroll_for(&rows, self.sidebar.scroll, self.sidebar.cursor, h);
         }
     }
 
@@ -187,15 +230,31 @@ impl App {
 
     fn apply_scan(&mut self, metas: Vec<SessionMeta>) {
         let folders = group(metas);
-        let found: Vec<&str> = folders.iter().flat_map(|f| f.chats.iter().map(|c| c.meta.id.as_str())).collect();
+        let found: Vec<&str> = folders.iter().flat_map(|f| f.chats.iter().filter(|c| !c.meta.empty).map(|c| c.meta.id.as_str())).collect();
         self.pending_new.retain(|(_, id)| !found.contains(&id.as_str()));
         self.apply_folders(folders);
     }
 
-    /// Replaces the sidebar folders, adding chats ct started that history doesn't know yet.
-    fn apply_folders(&mut self, mut folders: Vec<Folder>) {
+    /// Replaces the sidebar folders. Empty history chats show only while ct runs them, or while
+    /// they are selected or open. Chats ct started that history doesn't know yet are added; the ones
+    /// ct no longer runs (and nobody is looking at) are dropped.
+    fn apply_folders(&mut self, raw: Vec<Folder>) {
+        self.raw_folders = raw;
+        let selected = self.sidebar.selected_chat().map(|c| c.meta.id.clone());
+        let keep = |app: &App, id: &str| {
+            app.procs.is_running(id) || app.open_chat.as_deref() == Some(id) || selected.as_deref() == Some(id)
+        };
+        let pending = std::mem::take(&mut self.pending_new);
+        self.pending_new = pending.into_iter().filter(|(_, id)| keep(self, id)).collect();
+        let mut folders: Vec<Folder> = Vec::new();
+        for f in &self.raw_folders {
+            let chats: Vec<Chat> = f.chats.iter().filter(|c| !c.meta.empty || keep(self, &c.meta.id)).cloned().collect();
+            if !chats.is_empty() {
+                folders.push(Folder { chats, ..f.clone() });
+            }
+        }
         for (cwd, id) in &self.pending_new {
-            if folders.iter().any(|f| f.chats.iter().any(|c| &c.meta.id == id)) {
+            if self.raw_folders.iter().any(|f| f.chats.iter().any(|c| &c.meta.id == id)) {
                 continue;
             }
             let chat = Chat {
@@ -204,6 +263,7 @@ impl App {
                     cwd: cwd.clone(),
                     title: "new chat".into(),
                     modified: SystemTime::now(),
+                    empty: true,
                 },
                 available: cwd.exists(),
             };
@@ -220,6 +280,7 @@ impl App {
             }
         }
         self.sidebar.replace_folders(folders);
+        self.visibility = self.visibility_now();
     }
 
     pub(crate) fn find_chat(&self, id: &str) -> Option<&Chat> {
@@ -285,8 +346,8 @@ impl App {
         self.start_chat(id.clone(), spec, cwd.clone(), true);
         if self.open_chat.as_deref() == Some(id.as_str()) {
             self.pending_new.push((cwd, id.clone()));
-            let folders = self.sidebar.folders.clone();
-            self.apply_folders(folders);
+            let raw = self.raw_folders.clone();
+            self.apply_folders(raw);
             self.sidebar.select_by_id(&id);
         }
     }
@@ -428,7 +489,15 @@ impl App {
         self.focused_pane().is_some_and(|p| p.screen_lock().screen().bracketed_paste())
     }
 
+    pub fn help_open(&self) -> bool {
+        self.help
+    }
+
     pub(crate) fn on_paste(&mut self, text: &str) {
+        // the keys popup swallows paste
+        if self.help {
+            return;
+        }
         match &mut self.modal {
             Modal::Filter(s) => {
                 s.push_str(text);

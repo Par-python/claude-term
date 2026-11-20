@@ -1,7 +1,7 @@
 use crate::app::{App, Focus, Modal};
 use crate::keys::{Global, PrefixCmd, global_action, key_to_bytes, prefix_cmd};
 use crate::sidebar::SidebarAction;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 fn plain_char(k: &KeyEvent) -> Option<char> {
     match k.code {
@@ -13,6 +13,13 @@ fn plain_char(k: &KeyEvent) -> Option<char> {
 impl App {
     /// Returns false to quit.
     pub(crate) fn on_key(&mut self, k: KeyEvent) -> bool {
+        // the keys popup: any key closes it and is not acted on
+        if self.help {
+            if k.kind != KeyEventKind::Release {
+                self.help = false;
+            }
+            return true;
+        }
         // a status message goes away on the next key, and that key still counts
         if matches!(self.modal, Modal::Message(_)) {
             self.modal = Modal::None;
@@ -64,6 +71,7 @@ impl App {
     fn run_prefix(&mut self, cmd: PrefixCmd) -> bool {
         match cmd {
             PrefixCmd::Quit => return false,
+            PrefixCmd::Help => self.help = true,
             PrefixCmd::Scroll => self.enter_scroll_mode(),
             PrefixCmd::FocusLeft => {
                 self.scroll_mode = false;

@@ -2,8 +2,8 @@
 
 use crate::app::{App, Focus, Modal};
 use crate::pane::Pane;
-use crate::sidebar::{Row, window_offset};
-use crate::ui::{inner, layout};
+use crate::sidebar::Row;
+use crate::ui::{inner, layout, sidebar_lines};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
@@ -70,6 +70,13 @@ impl App {
     }
 
     pub(crate) fn on_mouse(&mut self, m: MouseEvent) {
+        // the keys popup: a click closes it, everything else is ignored
+        if self.help {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.help = false;
+            }
+            return;
+        }
         if !self.cfg.mouse || !matches!(self.modal, Modal::None | Modal::Message(_)) {
             return;
         }
@@ -124,8 +131,8 @@ impl App {
         }
         let rows = self.sidebar.rows();
         let cursor = self.sidebar.cursor.min(rows.len().saturating_sub(1));
-        let top = window_offset(self.sidebar.scroll, cursor, i.height as usize, rows.len());
-        let idx = top + (y - i.y) as usize;
+        let lines = sidebar_lines(&rows, self.sidebar.scroll, cursor, i.height as usize);
+        let Some(Some(idx)) = lines.get((y - i.y) as usize).copied() else { return };
         match rows.get(idx) {
             Some(Row::Chat(..)) => {
                 self.sidebar.cursor = idx;

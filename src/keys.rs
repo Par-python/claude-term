@@ -18,6 +18,8 @@ pub enum PrefixCmd {
     /// scroll mode on the focused pane
     Scroll,
     Quit,
+    /// the keys popup
+    Help,
 }
 
 /// What the prefix config string means. Unknown values fall back to ctrl+space.
@@ -38,6 +40,14 @@ fn parse_prefix(s: &str) -> PrefixKey {
             }
     }
     PrefixKey::Space
+}
+
+/// The prefix as shown to the user: what `parse_prefix` actually settled on.
+pub fn prefix_label(cfg: &Config) -> String {
+    match parse_prefix(&cfg.prefix) {
+        PrefixKey::Space => "ctrl+space".to_string(),
+        PrefixKey::Letter(c) => format!("ctrl+{c}"),
+    }
 }
 
 const OPT_DOWN: [char; 9] = ['¡', '™', '£', '¢', '∞', '§', '¶', '•', 'ª'];
@@ -100,6 +110,7 @@ pub fn prefix_cmd(ev: &KeyEvent) -> Option<PrefixCmd> {
         KeyCode::Char('b') => Some(PrefixCmd::ToggleSidebar),
         KeyCode::Char('[') => Some(PrefixCmd::Scroll),
         KeyCode::Char('q') => Some(PrefixCmd::Quit),
+        KeyCode::Char('?') => Some(PrefixCmd::Help),
         _ => None,
     }
 }
@@ -178,5 +189,23 @@ pub fn key_to_bytes(ev: &KeyEvent) -> Vec<u8> {
         out
     } else {
         base
+    }
+}
+
+#[cfg(test)]
+mod prefix_label_tests {
+    use super::*;
+
+    fn label(p: &str) -> String {
+        prefix_label(&crate::config::parse_config(&format!("prefix = \"{p}\"")))
+    }
+
+    #[test]
+    fn label_follows_the_parsed_prefix() {
+        assert_eq!(label("ctrl+h"), "ctrl+space");
+        assert_eq!(label("nonsense"), "ctrl+space");
+        assert_eq!(label("ctrl+space"), "ctrl+space");
+        assert_eq!(label("ctrl+b"), "ctrl+b");
+        assert_eq!(label("CTRL+B"), "ctrl+b");
     }
 }

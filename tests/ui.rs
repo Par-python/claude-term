@@ -17,6 +17,7 @@ fn chat(id: &str, cwd: &Path, title: &str, available: bool) -> Chat {
             cwd: cwd.to_path_buf(),
             title: title.into(),
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+        empty: false,
         },
         available,
     }
@@ -82,9 +83,11 @@ fn sidebar_renders_headers_numbers_and_markers() {
     let pid = app.procs.chat_pane("a1").unwrap().id;
     app.handle(AppEvent::Pty(ct::pane::Notify::Output(pid)));
     let lines = render(&app);
-    assert!(lines.iter().any(|l| l.contains("my-app ▾")), "{lines:#?}");
-    assert!(lines.iter().any(|l| l.contains("  0 ● alpha chat")), "{lines:#?}");
-    assert!(lines.iter().any(|l| l.contains("  1   second chat")), "{lines:#?}");
+    assert!(lines.iter().any(|l| l.starts_with(" MY-APP")), "{lines:#?}");
+    assert!(lines.iter().any(|l| l.contains(" 0  alpha chat")), "{lines:#?}");
+    assert!(lines.iter().any(|l| l.contains("  1  second chat")), "{lines:#?}");
+    let row = lines.iter().find(|l| l.chars().take(32).collect::<String>().contains("alpha chat")).unwrap();
+    assert_eq!(row.chars().nth(31), Some('●'), "{row}");
 }
 
 #[test]
@@ -102,7 +105,7 @@ fn hidden_sidebar_gives_full_width_to_panes() {
     let mut app = App::for_test(folders);
     let area = Rect::new(0, 0, 80, 24);
     let before = layout(area, app.sidebar_visible, app.zoomed, app.focus);
-    assert_eq!(before.chat.unwrap().width, 80 - 32);
+    assert_eq!(before.chat.unwrap().width, 80 - 32 - 1);
     app.handle(prefix());
     app.handle(ch('b'));
     assert!(!app.sidebar_visible);
@@ -210,9 +213,10 @@ fn history_scan_clears_pending_new() {
     app.pending_new.push((cwd.clone(), "p1".into()));
     app.pending_new.push((cwd.clone(), "p2".into()));
     app.handle(AppEvent::HistoryChanged);
-    assert_eq!(app.pending_new, vec![(cwd, "p2".to_string())]);
+    // p2 isn't running and history doesn't have it, so it goes too
+    assert!(app.pending_new.is_empty(), "{:?}", app.pending_new);
     let ids: Vec<&str> = app.sidebar.folders.iter().flat_map(|f| f.chats.iter().map(|c| c.meta.id.as_str())).collect();
-    assert!(ids.contains(&"p1") && ids.contains(&"p2"), "{ids:?}");
+    assert!(ids.contains(&"p1") && !ids.contains(&"p2"), "{ids:?}");
 }
 
 #[test]
@@ -283,7 +287,8 @@ fn unread_dot_wins_over_running_dot() {
     app.handle(alt('1'));
     app.procs.unread.insert("a1".into());
     let lines = render(&app);
-    assert!(lines.iter().any(|l| l.contains("  0 • alpha chat")), "{lines:#?}");
+    let row = lines.iter().find(|l| l.chars().take(32).collect::<String>().contains("alpha chat")).unwrap();
+    assert_eq!(row.chars().nth(31), Some('•'), "{row}");
 }
 
 #[test]
@@ -635,7 +640,7 @@ fn clicks_focus_panes_and_open_sidebar_chats() {
     use crossterm::event::{MouseButton, MouseEventKind::Down};
     let (_td, folders) = fixture();
     let mut app = App::for_test(folders);
-    // sidebar rows: 0 header, 1 a1, 2 a2 inside a 1-cell border
+    // sidebar rows: title line, then 0 header, 1 a1, 2 a2
     app.handle(mouse(Down(MouseButton::Left), 4, 1 + 2));
     assert_eq!(app.open_chat.as_deref(), Some("a2"));
     assert_eq!(app.focus, Focus::Chat);
@@ -666,4 +671,530 @@ fn drawing_is_held_while_a_visible_pane_is_mid_sync_block() {
     app.handle(alt('1'));
     wait_for("sync block", || screen_text(&app, "a1").contains("half"));
     assert!(app.hold_draw());
+}
+
+use ratatui::buffer::Buffer;
+use ratatui::style::Color;
+use ct::theme;
+
+fn buf_at(app: &App, w: u16, h: u16) -> Buffer {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| draw(f, app)).unwrap();
+    t.backend().buffer().clone()
+}
+
+fn row_text(buf: &Buffer, y: u16) -> String {
+    (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+}
+
+fn find_row(buf: &Buffer, needle: &str) -> Option<u16> {
+    // sidebar columns only, so pane titles with the same text don't match
+    (0..buf.area.height).find(|&y| row_text(buf, y).chars().take(32).collect::<String>().contains(needle))
+}
+
+#[test]
+fn no_box_borders() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.handle(alt('1'));
+    let text = render(&app).join("\n");
+    for c in ['┌', '┐', '└', '┘'] {
+        assert!(!text.contains(c), "found {c}");
+    }
+}
+
+#[test]
+fn vertical_divider_between_sidebar_and_panes() {
+    let (_td, folders) = fixture();
+    let app = App::for_test(folders);
+    let buf = buf_at(&app, 80, 24);
+    for y in 0..23 {
+        assert_eq!(buf[(32, y)].symbol(), "│", "row {y}");
+        assert_eq!(buf[(32, y)].fg, theme::DIVIDER, "row {y}");
+    }
+    // the right side is split by a horizontal divider
+    let y = (0..23).find(|&y| buf[(40, y)].symbol() == "─").expect("horizontal divider");
+    assert_eq!(buf[(40, y)].fg, theme::DIVIDER);
+}
+
+#[test]
+fn folder_headers_uppercase_dim() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.handle(alt('1'));
+    let buf = buf_at(&app, 80, 24);
+    let y1 = find_row(&buf, "MY-APP").expect("first header");
+    assert_eq!(buf[(1, y1)].symbol(), "M");
+    assert_eq!(buf[(1, y1)].fg, theme::TEXT_DIM);
+    let y2 = find_row(&buf, "OTHER").expect("second header");
+    assert_eq!(buf[(1, y2)].fg, theme::TEXT_DIM);
+    // blank row above the second header, none above the first
+    assert_eq!(row_text(&buf, y2 - 1).chars().take(32).collect::<String>().trim(), "");
+    assert_eq!(y1, 1);
+    // a collapsed header gets a faint arrow
+    let (_td2, mut folders2) = fixture();
+    folders2[1].collapsed = true;
+    let app2 = App::for_test(folders2);
+    let b2 = buf_at(&app2, 80, 24);
+    let y = find_row(&b2, "OTHER ▸").expect("collapsed header");
+    let x = row_text(&b2, y).chars().position(|c| c == '▸').unwrap() as u16;
+    assert_eq!(b2[(x, y)].fg, theme::TEXT_FAINT);
+}
+
+#[test]
+fn selected_row_style() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.handle(alt('2'));
+    let buf = buf_at(&app, 80, 24);
+    let y = find_row(&buf, "second chat").unwrap();
+    assert_eq!(buf[(0, y)].symbol(), "▌");
+    assert_eq!(buf[(0, y)].fg, theme::ACCENT);
+    for x in 0..32 {
+        assert_eq!(buf[(x, y)].bg, theme::SELECTION_BG, "col {x}");
+    }
+    assert_eq!(buf[(32, y)].bg, Color::Reset);
+    let tx = row_text(&buf, y).chars().position(|c| c == 's').unwrap() as u16;
+    for x in tx..tx + 11 {
+        assert_eq!(buf[(x, y)].fg, theme::TEXT_BRIGHT, "col {x}");
+    }
+    assert_eq!(buf[(2, y)].symbol(), "0");
+    assert_eq!(buf[(2, y)].fg, theme::ACCENT);
+    // an unselected chat row has no background and a faint number
+    let y1 = find_row(&buf, "third chat").unwrap();
+    assert_eq!(buf[(0, y1)].bg, Color::Reset);
+    assert_eq!(buf[(2, y1)].fg, theme::TEXT_FAINT);
+    assert_eq!(buf[(6, y1)].fg, theme::TEXT);
+    // the cursor on a header gets the same treatment
+    app.handle(prefix());
+    app.handle(ch('h'));
+    app.handle(ch('g'));
+    app.handle(ch('g'));
+    let buf = buf_at(&app, 80, 24);
+    assert_eq!(buf[(0, 1)].symbol(), "▌");
+    assert_eq!(buf[(5, 1)].bg, theme::SELECTION_BG);
+}
+
+#[test]
+fn focus_title_marker() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.handle(alt('1'));
+    assert_eq!(app.focus, Focus::Chat);
+    let buf = buf_at(&app, 80, 24);
+    assert_eq!(buf[(33, 0)].symbol(), "▸");
+    assert_eq!(buf[(33, 0)].fg, theme::ACCENT);
+    assert_eq!(buf[(35, 0)].fg, theme::TEXT_BRIGHT);
+    let x = row_text(&buf, 0).find("chats").unwrap() as u16;
+    assert_eq!(buf[(x, 0)].fg, theme::TEXT_DIM);
+    assert!(!row_text(&buf, 0).chars().take(32).any(|c| c == '▸'));
+    app.handle(prefix());
+    app.handle(ch('h'));
+    let buf = buf_at(&app, 80, 24);
+    assert_eq!(buf[(0, 0)].symbol(), "▸");
+    assert_eq!(buf[(0, 0)].fg, theme::ACCENT);
+    assert_eq!(buf[(2, 0)].fg, theme::TEXT_BRIGHT);
+    assert_ne!(buf[(33, 0)].symbol(), "▸");
+    assert_eq!(buf[(35, 0)].fg, theme::TEXT_DIM);
+}
+
+#[test]
+fn marks_are_accent() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.set_test_script("printf hi; sleep 5");
+    app.handle(alt('1'));
+    wait_for("output", || screen_text(&app, "a1").contains("hi"));
+    let pid = app.procs.chat_pane("a1").unwrap().id;
+    app.handle(AppEvent::Pty(ct::pane::Notify::Output(pid)));
+    let buf = buf_at(&app, 80, 24);
+    let y = find_row(&buf, "alpha chat").unwrap();
+    assert_eq!(buf[(31, y)].symbol(), "●");
+    assert_eq!(buf[(31, y)].fg, theme::ACCENT);
+    app.procs.unread.insert("a2".into());
+    let buf = buf_at(&app, 80, 24);
+    let y = find_row(&buf, "second chat").unwrap();
+    assert_eq!(buf[(31, y)].symbol(), "•");
+    assert_eq!(buf[(31, y)].fg, theme::ACCENT);
+}
+
+#[test]
+fn status_hint() {
+    let (_td, folders) = fixture();
+    let app = App::for_test(folders);
+    let buf = buf_at(&app, 80, 24);
+    let text = row_text(&buf, 23);
+    let x = text.find("ctrl+space ? keys").expect("hint") as u16;
+    assert_eq!(buf[(x, 23)].fg, theme::TEXT_DIM);
+    for x in 0..80 {
+        assert_eq!(buf[(x, 23)].bg, Color::Reset);
+    }
+    // the hint follows the configured prefix
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.set_config(ct::config::parse_config("prefix = \"ctrl+b\""));
+    assert!(row_text(&buf_at(&app, 80, 24), 23).contains("ctrl+b ? keys"));
+
+    // fork prompt is a warning in the accent color
+    let (td, folders) = fixture();
+    let root = td.path().join("projects");
+    std::fs::create_dir_all(root.join("proj")).unwrap();
+    std::fs::write(root.join("proj").join("a1.jsonl"), "{}\n").unwrap();
+    let mut app = App::for_test(folders);
+    app.set_root(root);
+    app.handle(alt('1'));
+    let buf = buf_at(&app, 80, 24);
+    let x = row_text(&buf, 23).find("chat open elsewhere").unwrap() as u16;
+    assert_eq!(buf[(x, 23)].fg, theme::ACCENT);
+    for x in 0..80 {
+        assert_eq!(buf[(x, 23)].bg, Color::Reset);
+    }
+}
+
+#[test]
+fn running_count_shows_at_right() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.set_test_script("sleep 5");
+    app.handle(alt('1'));
+    app.handle(alt('2'));
+    // a1 is now in the background and running
+    let text = row_text(&buf_at(&app, 80, 24), 23);
+    assert!(text.trim_end().ends_with("1 running"), "{text}");
+}
+
+#[test]
+fn long_title_keeps_mark() {
+    let td = tempfile::tempdir().unwrap();
+    let d = td.path().join("my-app");
+    std::fs::create_dir_all(&d).unwrap();
+    let long = "x".repeat(200);
+    let folders = vec![folder(&d, vec![chat("a1", &d, &long, true)])];
+    let mut app = App::for_test(folders);
+    app.set_test_script("printf hi; sleep 5");
+    app.handle(alt('1'));
+    wait_for("output", || screen_text(&app, "a1").contains("hi"));
+    let pid = app.procs.chat_pane("a1").unwrap().id;
+    app.handle(AppEvent::Pty(ct::pane::Notify::Output(pid)));
+    let buf = buf_at(&app, 80, 24);
+    let y = find_row(&buf, "xxxx").unwrap();
+    let line = row_text(&buf, y);
+    assert!(line.chars().take(32).any(|c| c == '…'), "{line}");
+    assert_eq!(buf[(31, y)].symbol(), "●");
+    assert_eq!(buf[(32, y)].symbol(), "│");
+}
+
+#[test]
+fn narrow_terminal_no_panic() {
+    for (w, h) in [(30u16, 10u16), (12, 5), (3, 2), (1, 1)] {
+        for hide in [false, true] {
+            let (_td, folders) = fixture();
+            let mut app = App::for_test(folders);
+            app.set_area(Rect::new(0, 0, w, h));
+            if hide {
+                app.handle(prefix());
+                app.handle(ch('b'));
+            }
+            app.handle(alt('1'));
+            let _ = buf_at(&app, w, h);
+        }
+    }
+}
+
+#[test]
+fn click_and_wheel_hit_right_targets() {
+    use crossterm::event::{MouseButton, MouseEventKind::Down};
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.set_test_script("seq 1 100; sleep 5");
+    let buf = buf_at(&app, 80, 24);
+    // third chat, and a chat below the blank row above the second header
+    let y3 = find_row(&buf, "third chat").unwrap();
+    app.handle(mouse(Down(MouseButton::Left), 5, y3));
+    assert_eq!(app.open_chat.as_deref(), Some("a3"));
+    app.handle(prefix());
+    app.handle(ch('h'));
+    let yb = find_row(&buf_at(&app, 80, 24), "beta chat").unwrap();
+    app.handle(mouse(Down(MouseButton::Left), 5, yb));
+    assert_eq!(app.open_chat.as_deref(), Some("b1"));
+    // wheel over the claude pane content scrolls that pane
+    app.handle(prefix());
+    app.handle(ch('h'));
+    let ya = find_row(&buf_at(&app, 80, 24), "alpha chat").unwrap();
+    app.handle(mouse(Down(MouseButton::Left), 5, ya));
+    assert_eq!(app.open_chat.as_deref(), Some("a1"));
+    wait_for("output", || screen_text(&app, "a1").contains("100"));
+    let (x, y) = pane_origin(&app);
+    wheel(&mut app, true, x + 1, y + 1);
+    assert_eq!(offset(&app), 3);
+    // wheel on the title line does not
+    wheel(&mut app, true, x + 1, y - 1);
+    assert_eq!(offset(&app), 3);
+}
+
+#[test]
+fn sidebar_scroll_counts_blank_lines_and_keeps_context() {
+    let td = tempfile::tempdir().unwrap();
+    let folders: Vec<Folder> = (0..8)
+        .map(|i| {
+            let d = td.path().join(format!("f{i}"));
+            folder(&d, vec![chat(&format!("c{i}"), &d, &format!("chat {i}"), true)])
+        })
+        .collect();
+    let mut app = App::for_test(folders);
+    app.set_area(Rect::new(0, 0, 80, 10));
+    let height = 8; // 10 rows - status - title
+    let line_of_cursor = |app: &App| {
+        let rows = app.sidebar.rows();
+        let cur = app.sidebar.cursor;
+        let lines = ct::ui::sidebar_lines(&rows, app.sidebar.scroll, cur, height);
+        let pos = lines.iter().position(|l| *l == Some(cur)).expect("cursor visible");
+        (rows.len(), lines, pos)
+    };
+    loop {
+        let (len, lines, pos) = line_of_cursor(&app);
+        if app.sidebar.cursor + 1 < len {
+            assert!(pos + 1 < lines.len(), "cursor stuck on the last line at {}: {lines:?}", app.sidebar.cursor);
+        }
+        if app.sidebar.cursor + 1 >= len {
+            break;
+        }
+        app.handle(ch('j'));
+    }
+    // one k moves the cursor, not the window
+    let before = app.sidebar.scroll;
+    app.handle(ch('k'));
+    assert_eq!(app.sidebar.scroll, before);
+    // drawing and clicking use the same stored offset: the cursor row is drawn
+    let buf = buf_at(&app, 80, 10);
+    assert!(find_row(&buf, "▌").is_some());
+}
+
+#[test]
+fn scroll_hints_are_plain_text() {
+    let (_td, mut app) = scrolled_app();
+    let (x, y) = pane_origin(&app);
+    wheel(&mut app, true, x + 1, y + 1);
+    let buf = buf_at(&app, 80, 24);
+    let text = row_text(&buf, 23);
+    let sx = text.find("scroll: 3 lines up").expect("hint") as u16;
+    assert_eq!(buf[(sx, 23)].fg, theme::TEXT);
+    app.handle(prefix());
+    app.handle(ch('['));
+    let buf = buf_at(&app, 80, 24);
+    let text = row_text(&buf, 23);
+    let sx = text.find("scroll: 3 lines up").expect("hint") as u16;
+    assert_eq!(buf[(sx, 23)].fg, theme::TEXT);
+}
+
+fn open_help(app: &mut App) {
+    app.handle(prefix());
+    app.handle(ch('?'));
+}
+
+#[test]
+fn help_opens_and_any_key_closes() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    assert!(!app.help_open());
+    open_help(&mut app);
+    assert!(app.help_open());
+    // 'j' would move the sidebar cursor, so it must be swallowed
+    let before = app.sidebar.cursor;
+    assert!(app.handle(ch('j')));
+    assert!(!app.help_open());
+    assert_eq!(app.sidebar.cursor, before);
+    // and alt+2 while open only closes it
+    open_help(&mut app);
+    app.handle(alt('2'));
+    assert!(!app.help_open());
+    assert_eq!(app.open_chat, None);
+}
+
+#[test]
+fn help_key_is_not_forwarded_to_pane() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.set_test_script("cat");
+    app.handle(alt('1'));
+    open_help(&mut app);
+    app.handle(ch('x'));
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!screen_text(&app, "a1").contains('x'));
+}
+
+#[test]
+fn help_renders_sections() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    open_help(&mut app);
+    let text = render(&app).join("\n");
+    for want in ["SIDEBAR", "EVERYWHERE", "SCROLL MODE", "FORK PROMPT", "then q", "alt+1..9", "esc"] {
+        assert!(text.contains(want), "missing {want}: {text}");
+    }
+    assert!(!text.contains("make the window taller"), "{text}");
+    assert!(text.contains(" keys "), "{text}");
+}
+
+#[test]
+fn click_closes_help() {
+    use crossterm::event::{MouseButton, MouseEventKind::Down};
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    open_help(&mut app);
+    app.handle(mouse(Down(MouseButton::Left), 4, 3));
+    assert!(!app.help_open());
+    assert_eq!(app.open_chat, None);
+}
+
+#[test]
+fn paste_ignored_while_help_open() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    open_help(&mut app);
+    app.handle(AppEvent::Input(Event::Paste("hi".into())));
+    assert!(app.help_open());
+}
+
+#[test]
+fn help_tiny_terminal_no_panic() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.focus = Focus::Chat;
+    open_help(&mut app);
+    for (w, h) in [(30u16, 10u16), (10, 4), (1, 1), (80, 24)] {
+        app.handle(AppEvent::Input(Event::Resize(w, h)));
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| draw(f, &app)).unwrap();
+    }
+}
+
+#[test]
+fn help_short_terminal_says_there_is_more() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.handle(AppEvent::Input(Event::Resize(60, 16)));
+    open_help(&mut app);
+    let mut t = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    t.draw(|f| draw(f, &app)).unwrap();
+    let buf = t.backend().buffer();
+    let text: String = buf.content().chunks(60).map(|r| r.iter().map(|c| c.symbol()).collect::<String>() + "\n").collect();
+    assert!(text.contains("make the window taller to see all keys"), "{text}");
+}
+
+fn empty_meta(id: &str, cwd: &Path) -> SessionMeta {
+    SessionMeta {
+        id: id.into(),
+        cwd: cwd.to_path_buf(),
+        title: "new chat".into(),
+        modified: SystemTime::UNIX_EPOCH + Duration::from_secs(2000),
+        empty: true,
+    }
+}
+
+fn row_ids(app: &App) -> Vec<String> {
+    app.sidebar.folders.iter().flat_map(|f| f.chats.iter().map(|c| c.meta.id.clone())).collect()
+}
+
+fn title_of(app: &App, id: &str) -> String {
+    app.sidebar.folders.iter().flat_map(|f| f.chats.iter()).find(|c| c.meta.id == id).map(|c| c.meta.title.clone()).unwrap_or_default()
+}
+
+#[test]
+fn empty_history_chat_hidden() {
+    let (td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    let cwd = td.path().join("my-app");
+    app.handle(AppEvent::Scanned(vec![empty_meta("e1", &cwd)]));
+    assert!(!row_ids(&app).contains(&"e1".to_string()), "{:?}", row_ids(&app));
+}
+
+#[test]
+fn empty_chat_shown_while_running() {
+    let (td, folders) = fixture();
+    let cwd = td.path().join("my-app");
+    let mut app = App::for_test(folders);
+    app.handle(ch('n'));
+    let id = app.open_chat.clone().unwrap();
+    // history now has the (still empty) session
+    app.handle(AppEvent::Scanned(vec![empty_meta(&id, &cwd)]));
+    let rows = row_ids(&app);
+    assert_eq!(rows.iter().filter(|r| **r == id).count(), 1, "{rows:?}");
+    assert_eq!(title_of(&app, &id), "new chat");
+    // moving the cursor away keeps it: ct is still running it
+    app.handle(ch('j'));
+    assert!(row_ids(&app).contains(&id));
+}
+
+#[test]
+fn pending_new_dropped_when_not_running() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.set_test_script("exit 0");
+    app.handle(ch('n'));
+    let id = app.open_chat.clone().unwrap();
+    wait_for("exit", || !app.procs.is_running(&id));
+    // still open in the chat pane, so it stays
+    app.handle(AppEvent::Tick);
+    assert!(row_ids(&app).contains(&id));
+    // opening something else lets it go, without a scan
+    app.handle(alt('1'));
+    assert!(app.pending_new.is_empty(), "{:?}", app.pending_new);
+    assert!(!row_ids(&app).contains(&id));
+}
+
+#[test]
+fn first_message_keeps_chat_visible() {
+    let (td, folders) = fixture();
+    let cwd = td.path().join("my-app");
+    let mut app = App::for_test(folders);
+    app.handle(ch('n'));
+    let id = app.open_chat.clone().unwrap();
+    let mut m = empty_meta(&id, &cwd);
+    m.title = "hello".into();
+    m.empty = false;
+    app.handle(AppEvent::Scanned(vec![m]));
+    let rows = row_ids(&app);
+    assert_eq!(rows.iter().filter(|r| **r == id).count(), 1, "{rows:?}");
+    assert_eq!(title_of(&app, &id), "hello");
+}
+
+#[test]
+fn folder_header_name_does_not_shift_when_selected() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    let name_col = |app: &App| {
+        let buf = buf_at(app, 80, 24);
+        let y = find_row(&buf, "MY-APP").expect("header");
+        row_text(&buf, y).chars().take(32).collect::<Vec<_>>().windows(6).position(|w| w.iter().collect::<String>() == "MY-APP").unwrap()
+    };
+    app.sidebar.cursor = 0;
+    let selected = name_col(&app);
+    app.sidebar.cursor = 1;
+    let unselected = name_col(&app);
+    assert_eq!(selected, unselected);
+    // the edge marker sits in column 0 only when selected
+    app.sidebar.cursor = 0;
+    let buf = buf_at(&app, 80, 24);
+    let y = find_row(&buf, "MY-APP").unwrap();
+    assert_eq!(buf[(0, y)].symbol(), "▌");
+}
+
+#[test]
+fn status_hint_uses_the_effective_prefix() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    app.set_config(ct::config::parse_config("prefix = \"ctrl+h\""));
+    assert!(row_text(&buf_at(&app, 80, 24), 23).contains("ctrl+space ? keys"));
+}
+
+#[test]
+fn help_lists_page_keys_in_scroll_mode() {
+    let (_td, folders) = fixture();
+    let mut app = App::for_test(folders);
+    open_help(&mut app);
+    let text = render(&app).join("\n");
+    assert!(text.contains("pgup/dn"), "{text}");
+    assert!(!text.contains("taller"), "{text}");
 }

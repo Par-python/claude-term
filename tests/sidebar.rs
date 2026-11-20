@@ -12,6 +12,7 @@ fn chat(id: &str, title: &str) -> Chat {
             cwd: PathBuf::from("/x"),
             title: title.into(),
             modified: SystemTime::UNIX_EPOCH,
+            empty: false,
         },
         available: true,
     }

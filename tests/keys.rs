@@ -82,6 +82,7 @@ fn prefix_commands() {
     assert_eq!(p('z'), Some(PrefixCmd::Zoom));
     assert_eq!(p('b'), Some(PrefixCmd::ToggleSidebar));
     assert_eq!(p('q'), Some(PrefixCmd::Quit));
+    assert_eq!(p('?'), Some(PrefixCmd::Help));
     assert_eq!(p('x'), None);
 }
 
@@ -195,4 +196,10 @@ fn mouse_config_defaults_on() {
 #[test]
 fn prefix_bracket_is_scroll_mode() {
     assert_eq!(prefix_cmd(&k(KeyCode::Char('['), KeyModifiers::NONE)), Some(PrefixCmd::Scroll));
+}
+
+#[test]
+fn prefix_question_is_help() {
+    let ev = k(KeyCode::Char('?'), KeyModifiers::NONE);
+    assert_eq!(prefix_cmd(&ev), Some(PrefixCmd::Help));
 }
